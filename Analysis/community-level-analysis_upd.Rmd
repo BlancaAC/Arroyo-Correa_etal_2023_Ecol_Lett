@@ -1,0 +1,1185 @@
+---
+title: "community-level-analysis"
+author: "Blanca Arroyo-Correa"
+date: "3/2/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+
+```{r packages}
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(igraph)
+library(magrittr)
+library(bipartite)
+library(igraph)
+
+library(r2d3)
+library(purrr) 
+library(tidyr) 
+library(stringr)
+library(tibble)
+library(RColorBrewer)
+library(scales)
+
+library(raster)
+library(viridis)
+library(ggridges)
+library(BBmisc)
+
+library(lubridate)
+library(spaa)
+library(asbio)
+library(pscl)
+library(boot)
+library(lmerTest)
+library(lme4)
+library(moments)
+
+library(tidySEM)
+library(lavaan)
+library(lavaanPlot)
+library(IDPmisc)
+
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(sjstats)
+library(visreg)
+library(patchwork)
+library(gridExtra)
+library(data.table)
+library(lme4)
+library(lmerTest)
+library(funModeling)
+library(piecewiseSEM)
+library(nlme)
+
+
+```
+
+# Feasibility domain (functions)
+
+```{r}
+
+#compute the interaction strength matrices according to the parameterization given in the methods section
+#inputs: web = mutualistic network (binary matrix), gamma_avg = average mutualistic strength, 
+#rho = mean field interspecific competition, delta = mutualistic trade-off
+#outputs: alpha = interaction strength matrix (full), alphaA = competition among plants, betaP = competition among animals,
+#gammaA = mutualistic effect of plants on animals, gammaP = mutualistic effect of animals on plants
+interaction_matrix <- function(web,gamma_avg,rho,delta){
+  SA <- nrow(web)
+  SP <- ncol(web)
+  alphaA <- matrix(rho,SA,SA) + (1-rho) * diag(rep(1,SA))
+  alphaP <- matrix(rho,SP,SP) + (1-rho) * diag(rep(1,SP))
+  gammaA <- diag(rowSums(web)^-delta) %*% web
+  gammaP <- diag(colSums(web)^-delta) %*% t(web)
+  f <- sum(gammaA[web == 1] + gammaP[t(web) == 1] ) / (2 * sum(web==1))
+  gammaA <- gamma_avg/f * diag(rowSums(web)^-delta) %*% web
+  gammaP <- gamma_avg/f * diag(colSums(web)^-delta) %*% t(web)
+  alpha <- rbind(cbind(alphaA,-gammaA),cbind(-gammaP,alphaP))
+  out <- list(alpha = alpha, alphaA = alphaA, alphaP = alphaP, gammaA = gammaA, gammaP = gammaP)
+  return(out)
+}
+
+#stability condition gamma_hat (average mutualistic strength at the stability threshold)
+#inputs: web = mutualistic network (binary matrix),
+#rho = mean field interspecific competition, delta = mutualistic trade-off
+#output: gamma_hat = stability condition
+gamma_hat <- function(web,rho,delta){
+  f_eig <- function(gamma_avg,web,rho,delta){
+    alpha <- interaction_matrix(web,gamma_avg,rho,delta)$alpha
+    out <- (min(Re(eigen(alpha)$values)))^2
+    out
+  }
+  out <- optimize(f_eig,c(0,1000),web = web, rho = rho, delta = delta)$minimum
+  return(out)
+}
+
+
+#feasibility condition---Omega
+#input: alpha = interaction strength matrix
+#output: Omega = feasibility condition (on a log10 scale)
+require(mvtnorm) #this function requires the librrary mvtnorm (Genz et al. 2009) for the
+#numerical computation of the cumulative distribution of the multivariate normal distirbution
+Omega <- function(alpha){
+  S <- nrow(alpha)
+  Sigma <-solve(t(alpha) %*% alpha)
+  m <- matrix(0,S,1)
+  a <- matrix(0,S,1)
+  b <- matrix(Inf,S,1)  
+  d <- pmvnorm(lower = rep(0,S), upper = rep(Inf,S), mean = rep(0,S), sigma = Sigma)
+  out <- log10(d[1])
+  return(out)
+}
+
+#function that computes the nestedness according to the definition of Bastolla et al. (Nature, 2009)
+#input: web = binary matrix representing the mutualsitic network (rows = Animals, columns = Plants)
+#output: n
+nestedness <- function(web){
+  SA <- nrow(web)
+  SP <- ncol(web)
+  N <- t(web) %*% web
+  num <- N
+  num[lower.tri(num,diag=TRUE)]=0
+  den <- (matrix(1,nrow=SP,ncol=1)*diag(N))%*%matrix(1,nrow=1,ncol=SP)
+  den <- pmin(den,t(den))
+  den[lower.tri(den,diag=TRUE)]=0
+  n1 <- sum(colSums(num))
+  n2 <- sum(colSums(den))
+  nP <-  n1/n2
+  N <- web %*% t(web)
+  num <- N
+  num[lower.tri(num,diag=TRUE)]=0
+  den <- (matrix(1,nrow=SA,ncol=1)*diag(N))%*%matrix(1,nrow=1,ncol=SA)
+  den <- pmin(den,t(den))
+  den[lower.tri(den,diag=TRUE)]=0
+  out <- (n1 + sum(colSums(num))) / (n2 + sum(colSums(den)))
+  return(out)
+}
+
+
+```
+
+# Read data
+
+The interaction matrix with standardized data is called 'total.int.mat' and it is constructed in the interaction-data-standardization' file. This is the interaction matrix including both video data and transect data.
+The 'id' dataset containing information on individual plants was also previously read.
+
+
+I need to check NAs produced in calculation of metrics
+
+```{r node.level.metrics}
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+total.int.mat <- read.csv("Data/complete_interaction_matrix.csv", sep=",")
+#ag.int.mat <- read.csv("Data/community_aggregated_matrix.csv", sep=",")
+
+# Distribution of individual plants per species and plot
+x <- aggregate(Plant_id ~ Plot + Plant_sp, plant.id, length)
+x <- dcast(x, Plot ~ Plant_sp)
+rownames(x) <- x[,1]
+x[,1] <- NULL
+x[is.na(x)] <- 0
+x.tot <- colSums(x)
+x <- rbind(x, x.tot)
+
+
+# Color palettes
+cols <- data.frame(Plant_sp = sort(unique(unique(plant.id$Plant_sp))), 
+                   stringsAsFactors = F)
+
+cols2 <- cbind(cols, data.frame(color = c("#a6cee3",
+"#1f78b4",
+"#b2df8a",
+"#33a02c",
+"#fb9a99",
+"#e31a1c",
+"#fdbf6f",
+"#ff7f00",
+"#cab2d6",
+"#6a3d9a",
+"grey50")))
+
+cols2 <- cbind(cols, data.frame(color = c("cadetblue3", "dodgerblue3",
+                                          "burlywood2", 
+                                          "lightpink1", "brown2", 
+                                          "darkolivegreen3", "forestgreen", 
+                                          "orange", "darkorange2", "gray70", 
+                                          "burlywood4")))
+cols2 %<>% filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% droplevels() %>% as.data.frame()
+
+cols2 <- setNames((cols2$color), cols2$Plant_sp)
+
+complete.matrix <- merge(total.int.mat, plant.id[,c(3,5)], by="Plant_id")
+
+
+```
+
+# Plant traits
+
+```{r traits}
+
+non.recorded.plants <- read.csv("Data/RBD_interaction_data_20220307.csv", sep=";")
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+recorded.plants <- read.csv("Data/RBD_video_processing_20220307.csv", sep=";")
+
+flower.data.1 <- unique(dplyr::select(non.recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+flower.data.2 <- unique(dplyr::select(recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+
+flower.data <- rbind(flower.data.1, flower.data.2)
+flower.data$N_flowers <- as.numeric(flower.data$N_flowers)
+
+# total number of flowers
+
+flower.data <- aggregate(N_flowers ~ Plant_id + Plant_sp + Plot, flower.data, sum)
+
+flower.data <- merge(flower.data, plant.id, by=c("Plant_id", "Plant_sp", "Plot"), all.x = T)
+
+flower.data$Plant_id[duplicated(flower.data$Plant_id)]
+
+
+plant.area <- read.csv("Data/Plant_traits/Plant_size/individual_plant_area.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Area_m2)
+
+plant.height <- read.csv("Data/Plant_traits/Plant_size/individual_plant_height.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Height_cm)
+
+plant.traits <- merge(plant.id, flower.data[, c(1,4)], by="Plant_id", all.x=T)
+plant.traits[is.na(plant.traits)] <- 0
+
+plant.traits <- merge(plant.traits, plant.area, by="Plant_id")
+plant.traits <- merge(plant.traits, plant.height, by="Plant_id")
+
+cor.test(plant.traits$Area_m2, plant.traits$Height_cm)
+plot(plant.traits$Area_m2, plant.traits$Height_cm)
+
+cor.test(plant.traits$Area_m2, plant.traits$N_flowers)
+plot(plant.traits$Area_m2, plant.traits$N_flowers)
+
+cor.test(plant.traits$Height_cm, plant.traits$N_flowers)
+plot(plant.traits$Height_cm, plant.traits$N_flowers)
+
+# Flowering synchrony
+synchrony.index <- read.csv("Data/Plant_traits/flowering_synchrony_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, synchrony.index[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+all.data <- merge(plant.traits, metrics, by="Plant_id")
+
+plant.traits[rowSums(is.na(plant.traits)) > 0, ]
+
+# Neighbourhood cover
+cover.neigh <- read.csv("Data/Plant_traits/neighbourhood_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, cover.neigh[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+#write.csv(plant.traits,"Data/all_plant_traits.csv", row.names = FALSE)
+
+#all.plant.data <- merge(plant.traits, metrics, by="Plant_id")
+
+
+
+```
+
+
+# Resampling of individuals (species-based networks) incorporating the whole range of variation
+
+I use here two methods, first I randomly sample a fixed number of individuals per species within the community (n= 2,... max(individuals)). Second I select a variable number of individuals per species based on their relative abundance within the community, fixing the community size (e.g., n=20)
+
+```{r resampling.comm}
+
+comm.matrix <- complete.matrix %>% filter(Plant_sp!= "CSAL", Plant_sp!= "UPAR")
+comm.matrix %<>% rowwise() %>% filter(sum(c_across(where(is.numeric))) != 0) # only interacting plants
+
+rel.abun <- read.csv("Data/relative_abundance_plant_sp.csv", sep=",") %>% 
+  rename(Plant_sp= Neighbour_sp, Abundance= Cover_within_section)
+rel.abun <- comm.matrix %>% group_by(Plant_sp) %>% summarise(n=n()) %>% mutate(n=n/sum(n))
+
+
+
+#write.csv(metrics.ind.all,"Data/community_simulations_info_inds.csv", row.names = FALSE)
+#info.ind.all <- read.csv("Data/community_simulations_info_inds.csv")
+#
+#metrics.ind.all <- do.call(rbind, metrics.ind)  # info on plant id in each iteration
+#write.csv(metrics.ind.all,"Data/community_simulations_ind_metrics.csv", row.names = FALSE)
+#metrics.ind.all <- read.csv("Data/community_simulations_ind_metrics.csv")
+#
+#random.all.comm[sapply(random.all.comm, is.null)] <- NULL # remove empty elements
+
+
+
+## generation of random samples of individuals (proportional to relative abundance) calculating all individual-level metrics BUT WITH A FIXED COMMUNITY SIZE (TO REMOVE THIS CONFOUNDING FACTOR)
+flowers.sim.ind <- plant.traits %>% dplyr::select(Plant_sp, Plant_id, N_flowers) %>% group_by(Plant_sp) %>% mutate(N_flowers=range01(N_flowers))
+flowers.sim.ind %>% group_by(Plant_sp) %>% summarise(sum(N_flowers))
+
+random.all.comm.fixed <- list()
+
+for(x in seq(40, 180, by=20)){
+  z <- list()
+for(i in 1:100){ # number of randomizations (iterations)
+sampled.com.m <- comm.matrix %>%
+  group_by(Plant_sp) %>%   # prep for work by Species
+  nest() %>%              # --> one row per Species
+  ungroup() %>% 
+  arrange(Plant_sp) %>%
+  mutate(n = round((rel.abun$n)*x)) %>%
+mutate(samp = map2(data, n, sample_n)) %>% 
+dplyr::select(-data) %>%
+unnest(samp)
+sampled.com.m$N_ind <- x
+z[[i]] <- sampled.com.m
+}
+  random.all.comm.fixed[[x]] <- z
+  names(random.all.comm.fixed)[x] <- x
+}
+random.all.comm.fixed[sapply(random.all.comm.fixed, is.null)] <- NULL # remove elements
+
+###
+
+l <- list()
+info.ind <- list()
+for (i in seq_along(random.all.comm.fixed)){
+  y <- list()
+  n.flower <- list()
+  for (j in seq_along(random.all.comm.fixed[[i]])){
+  
+  temp <- random.all.comm.fixed[[i]][[j]]
+  temp2 <- data.frame(matrix(ncol=4,nrow=nrow(temp),
+                            dimnames=list(NULL, c("Plant_sp", "Plant_id", 
+                                                  "Iteration", "N_ind"))))
+  temp2$Plant_sp <- temp$Plant_sp
+  temp2$Plant_id <- temp$Plant_id
+  temp2$Iteration <- j
+  temp2$N_ind <- temp$N_ind
+  temp2 <- merge(temp2, flowers.sim.ind, by=c("Plant_id", "Plant_sp"))
+  
+  # Individual-level metrics
+  matrix.sp <- split(random.all.comm.fixed[[i]][[j]],
+                     random.all.comm.fixed[[i]][[j]]$Plant_sp)
+  
+  metrics.per.sp <- list()
+  for (n in 1:length(matrix.sp)) {
+    net <- as.data.frame(dplyr::select(matrix.sp[[n]], -c("Plant_sp", "n",
+                                                          "Plant_id", "N_ind")))
+    net <- round(net*1000, 0)
+    net %<>% dplyr::select_if(colSums(.) != 0)
+    
+    if(ncol(net)>1) {
+      if(nrow(net)>1) {
+    temp3 <- specieslevel(net, 
+                        level = "lower", 
+                        index = "degree")
+    
+    temp3$Iteration <- j # iteration number 
+    temp3$Plant_sp <- matrix.sp[[n]]$Plant_sp
+    temp3$Plant_id <- matrix.sp[[n]]$Plant_id
+    temp3$N_ind <- matrix.sp[[n]]$N_ind
+    
+      }}
+    metrics.per.sp[[n]] <- temp3 # for each j network
+  }
+  metrics.per.sp <- bind_rows(metrics.per.sp) # for each j network
+  y[[j]] <- metrics.per.sp
+  n.flower[[j]] <- temp2  # info number of flowers per individual included in each network
+  
+  ag.web <- aggregate(. ~ Plant_sp, 
+                      dplyr::select(
+                        random.all.comm.fixed[[i]][[j]], -n, -N_ind, -Plant_id), sum)
+  ag.web$N_ind <- names(random.all.comm.fixed)[i]
+  random.all.comm.fixed[[i]][[j]] <- ag.web
+
+  } 
+
+  info.ind[[i]] <- do.call(rbind, n.flower) 
+  l[[i]] <- do.call(rbind, y)
+}
+
+info.ind.all.fixed <- do.call(rbind, info.ind)
+metrics.ind.all.fixed <- do.call(rbind, l)
+
+# calculation of network-level metrics
+pb1 <- txtProgressBar(0, length(random.all.comm.fixed), style = 3)
+pb2 <- txtProgressBar(0, length(random.all.comm.fixed[[1]]), style = 3)
+
+
+q <- list()
+s <- list()
+for (i in seq_along(random.all.comm.fixed)){
+x <- list()
+y <- list()
+for (j in seq_along(random.all.comm.fixed[[i]])){
+    temp <- dplyr::select_if(as.data.frame(random.all.comm.fixed[[i]][[j]]), is.numeric)
+    temp <- round(temp*100, 0) # 1000 or 100?
+    temp %<>% dplyr::select_if(colSums(.) != 0) 
+    
+    if(ncol(temp)>1) {
+      if(nrow(temp)>1) {
+   
+    temp2 <- as.data.frame(nested(as.matrix(temp), method="NODF"))
+    names(temp2)[1] <- "obs_NODF"
+    
+    temp2$connectance <- networklevel(as.matrix(temp), index="connectance")
+    temp2$Iteration <- j
+    temp2$N_pol <- ncol(temp)
+    temp2$N_ind <- names(random.all.comm.fixed)[i]
+    distance <- proxy::dist(temp, by_rows = TRUE, method = "Jaccard")
+    temp2$Overlap <- 1- mean(distance)
+    
+    temp[temp != 0] <- 1 # makes a binary matrix
+    rho <- 0    #level of interspecific competition
+    delta <- 0.3   #level of mutualistic trade-off
+    
+    stab <- gamma_hat(as.matrix(temp), rho, delta) #compute the stability condition
+    gamma_avg <- (trunc(stab*10^2)/10^2)/2
+    temp2$Stability <- stab
+    m <- interaction_matrix(as.matrix(temp), stab/2, rho, delta) #compute the interaction matrix for rho=0 and delta=0.1 
+    #and with an average mutualsitic strength of gamma_avg = 0.1 (note that this average strength is below the stability condition)
+    alpha <- m$alpha
+    om <- 10^(Omega(alpha)) #compute the feasibility condition for the interaction strength matrix alpha (on a log10 scale)
+    
+    temp2$Omega <- om^(1/(ncol(temp)))
+    
+    temp3 <- specieslevel(temp, level = "lower", index = "degree")
+    temp3$Plant_sp <- as.data.frame(random.all.comm.fixed[[i]][[j]])$Plant_sp
+    temp3$Iteration <- j
+    temp3$N_ind <- names(random.all.comm.fixed)[i]
+    
+    x[[j]] <- temp2
+    y[[j]] <- temp3
+      }}
+    setTxtProgressBar(pb2, j)
+}
+    q[[i]] <- do.call(rbind, x)
+    s[[i]] <- do.call(rbind, y)
+    setTxtProgressBar(pb1, i)
+}
+  
+
+
+sim.com.fixed <- do.call(rbind, q)
+degree.sp.all.fixed <- do.call(rbind, s)
+
+
+sim.com.fixed$N_ind <- as.numeric(sim.com.fixed$N_ind)
+degree.sp.all.fixed$N_ind <- as.numeric(degree.sp.all.fixed$N_ind)
+
+
+str(sim.com.fixed)
+sim.com.fixed %>% ggplot(aes(x=Omega, y=as.factor(N_ind), 
+                       fill=as.factor(N_ind), color=as.factor(N_ind))) +
+  stat_density_ridges(bandwidth = 0.01,
+                      quantile_lines = TRUE, quantiles = 2, alpha = 0.8) +
+  theme_bw(base_size = 15)
+
+sim.com.fixed %>% ggplot(aes(x=N_ind, y=Omega)) +
+  geom_point() + geom_smooth() +
+  theme_bw(base_size = 15)
+
+test <- as.data.frame(
+  as.matrix(aggregate(degree ~ N_ind + Iteration, degree.sp.all.fixed, function(x) c(mean = mean(x), sd = se(x)))))
+str(test)
+test %>% ggplot(aes(x=N_ind, y=degree.mean)) +
+  geom_point() + geom_smooth() +
+  theme_bw(base_size = 15)
+
+```
+
+# Resampling of individuals (species-based networks) splitting data into different ranges of variation
+
+```{r}
+
+pb1 <- txtProgressBar(0, 3, style = 3)
+pb2 <- txtProgressBar(0, 100, style = 3)
+random.all.comm <- list()
+metrics.ind <- list()
+info.ind <- list()
+
+comm.matrix.flowers <- merge(comm.matrix, flowers.sim.ind, by=c("Plant_id", "Plant_sp"))
+comm.matrix.flowers %<>% group_by(Plant_sp) %>% arrange(Plant_sp, N_flowers) %>% dplyr::select(-N_flowers)
+
+# split into multiple dataframes
+n <- 3
+comm.matrix.flowers.part <- split(comm.matrix.flowers, comm.matrix.flowers$Plant_sp)
+
+for (i in seq_along(comm.matrix.flowers.part)){
+  temp <- split(comm.matrix.flowers.part[[i]], factor(sort(rank(row.names(comm.matrix.flowers.part[[i]]))%%n)))
+  for (j in seq_along(temp)){
+    temp[[j]]$Level <- names(temp)[[j]]
+  }
+  temp2 <- do.call(rbind, temp)
+  comm.matrix.flowers.part[[i]] <- temp2
+}
+comm.matrix.flowers.all <- do.call(rbind, comm.matrix.flowers.part)
+
+
+comm.matrix.level <- split(comm.matrix.flowers.all, comm.matrix.flowers.all$Level)
+rel.abun <- comm.matrix %>% group_by(Plant_sp) %>% summarise(n=n()) %>% mutate(n=n/sum(n))
+
+
+
+metrics.ind.level <- list()
+info.ind.level <- list()
+random.flower.sim.all <- list()
+
+for (s in seq_along(comm.matrix.level)){
+metrics.ind.all <- list()
+info.ind.all <- list()
+random.sim.all <- list()
+for (z in seq(40, 180, by=20)){
+random.flower.sim <- list()
+n.flower.sim <- list()
+y <- list()
+for(k in 1:100){ # community size (number of individuals in the community)
+  sampled.com.m <- comm.matrix.level[[s]] %>%
+    group_by(Plant_sp) %>%   # prep for work by Species
+    nest() %>%              # --> one row per Species
+    ungroup() %>% 
+    arrange(Plant_sp) %>% # sort by plant species
+    mutate(n = round((rel.abun$n)*z)) %>% # operate on 2 things (data = DATA FOR ONE SPECIES, n = SAMPLE SIZE)
+  mutate(samp = map2(data, n, sample_n)) %>% # select top n individuals
+  dplyr::select(-data) %>%
+  unnest(samp)
+  temp <- sampled.com.m
+  
+  temp2 <- data.frame(matrix(ncol=5,nrow=nrow(temp), 
+                               dimnames=list(NULL, c("Plant_sp", "Plant_id", "Iteration", "N_ind", "Level"))))
+  temp2$Plant_sp <- temp$Plant_sp
+  temp2$Plant_id <- temp$Plant_id
+  temp2$Iteration <- k
+  temp2$N_ind <- z
+  temp2$Level <- s
+  temp2 <- merge(temp2, flowers.sim.ind, by=c("Plant_id", "Plant_sp"))
+  
+  # Individual-level metrics
+  matrix.sp <- split(temp, temp$Plant_sp)
+  
+  metrics.per.sp <- list()
+  for (n in 1:length(matrix.sp)) {
+    net <- as.data.frame(dplyr::select(matrix.sp[[n]], -c("Plant_sp", "n", 
+                                                          "Plant_id", "Level")))
+    net <- round(net*100, 0)
+    net %<>% dplyr::select_if(colSums(.) != 0)
+    
+    if(ncol(net)>1) {
+      if(nrow(net)>1) {
+    temp3 <- specieslevel(net, 
+                        level = "lower", 
+                        index = "degree") 
+    
+    temp3$Iteration <- k # iteration number 
+    temp3$N_ind <- z
+    temp3$Level <- s
+    temp3$Plant_sp <- matrix.sp[[n]]$Plant_sp
+    temp3$Plant_id <- matrix.sp[[n]]$Plant_id
+    
+      }}
+    
+    metrics.per.sp[[n]] <- temp3
+  }
+  metrics.per.sp <- bind_rows(metrics.per.sp)
+  y[[k]] <- metrics.per.sp
+  
+  net <- aggregate(. ~ Plant_sp, 
+                   dplyr::select(temp, -Plant_id, -n, -Level), sum)
+  net$Iteration <- k
+  net$N_ind <- z
+  net$Level <- s
+  
+  random.flower.sim[[k]] <- net
+  n.flower.sim[[k]] <- temp2  # info number of flowers per individual included in each network
+
+  names(random.flower.sim)[[k]] <- k
+  setTxtProgressBar(pb2, k)
+}
+metrics.ind.all[[z]] <- do.call(rbind, y)
+info.ind.all[[z]] <- do.call(rbind, n.flower.sim)
+random.sim.all[[z]] <- random.flower.sim
+names(random.sim.all)[z] <- z
+random.sim.all[sapply(random.sim.all, is.null)] <- NULL # remove elements
+setTxtProgressBar(pb1, z)
+
+}
+metrics.ind.level[[s]] <- do.call(rbind, metrics.ind.all)
+info.ind.level[[s]] <- do.call(rbind, info.ind.all)
+random.flower.sim.all[[s]] <- random.sim.all
+} 
+
+metrics.ind <- do.call(rbind, metrics.ind.level)
+info.ind <- do.call(rbind, info.ind.level)
+
+
+
+# calculation of network-level metrics
+pb3 <- txtProgressBar(0, length(random.flower.sim.all), style = 3)
+pb4 <- txtProgressBar(0, 100, style = 3)
+
+a <- list()
+b <- list()
+for (z in seq_along(random.flower.sim.all)){
+  c <- list()
+  d <- list()
+for (k in seq_along(random.flower.sim.all[[z]])){
+  e <- list()
+  f <- list()
+  for (j in seq_along(random.flower.sim.all[[z]][[k]])){
+  temp <- dplyr::select(as.data.frame(random.flower.sim.all[[z]][[k]][[j]]), -Plant_sp, -Iteration, -Level)
+  temp <- round(temp*100, 0) # 1000 or 100?
+  temp %<>% select_if(colSums(.) != 0) 
+  if(ncol(temp)>1) {
+    if(nrow(temp)>1) {
+      
+      temp2 <- as.data.frame(nested(as.matrix(temp), method="NODF"))
+      names(temp2)[1] <- "obs_NODF"
+      
+      temp2$connectance <- networklevel(as.matrix(temp), index="connectance")
+      distance <- proxy::dist(temp, by_rows = TRUE, method = "Jaccard")
+      temp2$Overlap <- 1- mean(distance)
+      
+      temp[temp != 0] <- 1 # makes a binary matrix
+      rho <- 0    #level of interspecific competition
+      delta <- 0.3   #level of mutualistic trade-off
+      
+      stab <- gamma_hat(as.matrix(temp), rho, delta) #compute the stability condition
+      gamma_avg <- (trunc(stab*10^2)/10^2)/2
+      temp2$Stability <- stab
+      m <- interaction_matrix(as.matrix(temp), stab/2, rho, delta) #compute the interaction matrix for rho=0 and delta=0.1 
+      #and with an average mutualsitic strength of gamma_avg = 0.1 (note that this average strength is below the stability condition)
+      alpha <- m$alpha
+      om <- 10^(Omega(alpha)) #compute the feasibility condition for the interaction strength matrix alpha (on a log10 scale)
+    
+      temp2$Omega <- om^(1/(ncol(temp)))
+      
+      temp2$Iteration <- j
+      temp2$Level <- z
+      temp2$N_ind <- names(random.flower.sim.all[[z]])[k]
+      
+      temp3 <- specieslevel(temp,level = "lower", index = "degree")
+      temp3$Plant_sp <- as.data.frame(random.flower.sim.all[[z]][[k]][[j]])$Plant_sp
+      temp3$Iteration <- j
+      temp3$Level <- z
+      temp3$N_ind <- names(random.flower.sim.all[[z]])[k]
+      
+    }
+    e[[j]] <- temp2
+    f[[j]] <- temp3
+  }
+
+  c[[k]]  <- do.call(rbind, e)
+  d[[k]]  <- do.call(rbind, f)
+  }
+  sim.com <- (do.call(rbind, c))
+  degree.sp <- (do.call(rbind, d))
+  a[[z]] <- sim.com
+  b[[z]] <- degree.sp
+
+}
+  setTxtProgressBar(pb3, z)
+}
+
+
+sim.com.all <- (do.call(rbind, a))
+sim.com.all$N_ind <- as.numeric(sim.com.all$N_ind)
+
+
+degree.sp.all <- (do.call(rbind, b))
+degree.sp.all$N_ind <- as.numeric(degree.sp.all$N_ind)
+
+
+
+```
+
+# Effects of community size
+
+```{r}
+
+my_colors <- rev(RColorBrewer::brewer.pal(9, "Blues")[c(4,6,8)])
+my_colors <- c(my_colors, "grey50")
+
+str(sim.com.fixed)
+sim.com.fixed$Level <- 4
+
+# feasibility
+comm.size.mean.sd <- rbind(
+  dplyr::select(sim.com.fixed, Omega, N_ind, Level),
+  dplyr::select(sim.com.all, Omega, N_ind, Level))
+
+str(comm.size.mean.sd)
+comm.size.mean.sd <- as.data.frame(
+  as.matrix(aggregate(Omega ~ Level + N_ind, comm.size.mean.sd, function(x) c(mean = mean(x), sd = sd(x)))))
+str(comm.size.mean.sd)
+comm.size.mean.sd %<>% mutate(across(-c("Level"), as.numeric))
+
+comm.size.mean.sd %<>% mutate(Level_text = ifelse(Level == 1, "Low",
+               ifelse(Level == 2, "Medium", ifelse(Level == 3, "High", "Random"))))
+comm.size.mean.sd$Level_text = factor(comm.size.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+comm.size.mean.sd$Level_text = factor(comm.size.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+feasibility.plot <- ggplot(comm.size.mean.sd, aes(x=N_ind, y=Omega.mean, 
+                              group=as.factor(Level_text))) +
+  geom_line(aes(x=N_ind, y=Omega.mean, colour=as.factor(Level_text)), size=0.7) +
+  geom_ribbon(aes(ymin=Omega.mean - Omega.sd,
+                  ymax=Omega.mean + Omega.sd, fill=as.factor(Level_text)), alpha=0.2) +
+  theme_bw(base_size=15) + ylab("Feasibility") + xlab("Community size") +
+  theme(strip.text.x = element_text(color = "black"),
+        strip.text.y = element_text(color = "black"),
+        axis.title.y= element_text(color = "black"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0)), legend.position = "none") + 
+  scale_fill_manual(values = my_colors) + 
+  scale_color_manual(values = my_colors)
+
+# nestedness
+nodf.mean.sd <- rbind(
+  dplyr::select(sim.com.fixed, obs_NODF, N_ind, Level),
+  dplyr::select(sim.com.all, obs_NODF, N_ind, Level))
+
+str(nodf.mean.sd)
+nodf.mean.sd <- as.data.frame(
+  as.matrix(aggregate(obs_NODF ~ Level + N_ind, nodf.mean.sd, function(x) c(mean = mean(x), sd = sd(x)))))
+str(nodf.mean.sd)
+nodf.mean.sd %<>% mutate(across(-c("Level"), as.numeric))
+
+nodf.mean.sd %<>% mutate(Level_text = ifelse(Level == 1, "Low",
+               ifelse(Level == 2, "Medium", ifelse(Level == 3, "High", "Random"))))
+nodf.mean.sd$Level_text = factor(nodf.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+nodf.mean.sd$Level_text = factor(nodf.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+nodf.plot <- ggplot(nodf.mean.sd, aes(x=N_ind, y=obs_NODF.mean, 
+                              group=as.factor(Level_text))) +
+  geom_line(aes(x=N_ind, y=obs_NODF.mean, colour=as.factor(Level_text)), size=0.7) +
+  geom_ribbon(aes(ymin=obs_NODF.mean - obs_NODF.sd,
+                  ymax=obs_NODF.mean + obs_NODF.sd, fill=as.factor(Level_text)), alpha=0.2) +
+  theme_bw(base_size=15) + ylab("Nestedness (NODF)") + xlab("Community size") +
+  theme(strip.text.x = element_text(color = "black"),
+        strip.text.y = element_text(color = "black"),
+        axis.title.y= element_text(color = "black"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        legend.title = element_text(face="bold"), legend.position = "none") + 
+  scale_fill_manual(values = my_colors, name="Flower production \nper individual") + 
+  scale_color_manual(values = my_colors, name="Flower production \nper individual")
+
+
+# overlap
+overlap.mean.sd <- rbind(
+  dplyr::select(sim.com.fixed, Overlap, N_ind, Level),
+  dplyr::select(sim.com.all, Overlap, N_ind, Level))
+
+str(overlap.mean.sd)
+overlap.mean.sd <- as.data.frame(
+  as.matrix(aggregate(Overlap ~ Level + N_ind, overlap.mean.sd, function(x) c(mean = mean(x), sd = sd(x)))))
+str(overlap.mean.sd)
+overlap.mean.sd %<>% mutate(across(-c("Level"), as.numeric))
+
+overlap.mean.sd %<>% mutate(Level_text = ifelse(Level == 1, "Low",
+               ifelse(Level == 2, "Medium", ifelse(Level == 3, "High", "Random"))))
+overlap.mean.sd$Level_text = factor(overlap.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+overlap.mean.sd$Level_text = factor(overlap.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+overlap.plot <- ggplot(overlap.mean.sd, aes(x=N_ind, y=Overlap.mean, 
+                              group=as.factor(Level_text))) +
+  geom_line(aes(x=N_ind, y=Overlap.mean, colour=as.factor(Level_text)), size=0.7) +
+  geom_ribbon(aes(ymin=Overlap.mean - Overlap.sd,
+                  ymax=Overlap.mean + Overlap.sd, fill=as.factor(Level_text)), alpha=0.2) +
+  theme_bw(base_size=15) + ylab("Overlap among species") + xlab("Community size") +
+  theme(strip.text.x = element_text(color = "black"),
+        strip.text.y = element_text(color = "black"),
+        axis.title.y= element_text(color = "black"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        legend.title = element_text(face="bold")) + 
+  scale_fill_manual(values = my_colors, name="Flower production \nper individual") + 
+  scale_color_manual(values = my_colors, name="Flower production \nper individual")
+
+
+
+## degree
+degree.sp.all.fixed.mean <- as.data.frame(
+  as.matrix(aggregate(degree ~ N_ind + Iteration, degree.sp.all.fixed, function(x) c(mean = mean(x)))))
+str(degree.sp.all.fixed.mean)
+degree.sp.all.fixed.mean %<>% mutate_all(as.numeric)
+degree.sp.all.fixed.mean$Level <- 4
+
+degree.sp.all.mean <- as.data.frame(
+  as.matrix(aggregate(degree ~ N_ind + Iteration + Level, degree.sp.all, function(x) c(mean = mean(x)))))
+str(degree.sp.all.mean)
+degree.sp.all.mean %<>% mutate_all(as.numeric)
+
+degree.mean.sd <- rbind(degree.sp.all.mean, degree.sp.all.fixed.mean)
+degree.mean.sd$degree <- as.numeric(degree.mean.sd$degree)
+str(degree.mean.sd)
+degree.mean.sd <- as.data.frame(
+  as.matrix(aggregate(degree ~ Level + N_ind, degree.mean.sd, function(x) c(mean = mean(x), sd = sd(x)))))
+str(degree.mean.sd)
+
+degree.mean.sd %<>% mutate(Level_text = ifelse(Level == 1, "Low",
+               ifelse(Level == 2, "Medium", ifelse(Level == 3, "High", "Random"))))
+
+degree.mean.sd$Level_text = factor(degree.mean.sd$Level_text, levels = c("High","Medium","Low","Random"))
+
+degree.plot <- ggplot(degree.mean.sd, aes(x=N_ind, y=degree.mean, 
+                              group=as.factor(Level_text))) +
+  geom_line(aes(x=N_ind, y=degree.mean, colour=as.factor(Level_text)), size=0.7) +
+  geom_ribbon(aes(ymin=degree.mean - degree.sd,
+                  ymax=degree.mean + degree.sd, fill=as.factor(Level_text)), alpha=0.2) +
+  theme_bw(base_size=15) + ylab("Mean species-level degree") + xlab("Community size") +
+  theme(strip.text.x = element_text(color = "black"),
+        strip.text.y = element_text(color = "black"),
+        axis.title.y= element_text(color = "black"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0)),
+        legend.position = "none") + 
+  scale_fill_manual(values = my_colors) + 
+  scale_color_manual(values = my_colors)
+
+
+degree.plot + overlap.plot + nodf.plot + feasibility.plot
+
+
+```
+
+
+# Observed network metrics
+
+```{r}
+
+ag.comm.matrix <- comm.matrix %>% dplyr::select(-Plant_id) 
+ag.comm.matrix <- aggregate(.~Plant_sp, ag.comm.matrix, sum)
+ag.comm.matrix %<>% dplyr::select(-Plant_sp)
+
+temp <- ag.comm.matrix
+obs.values <- as.data.frame(nested(as.matrix(temp), method="NODF"))
+names(obs.values)[1] <- "obs_NODF"
+
+obs.values$connectance <- networklevel(as.matrix(temp), index="connectance")
+distance <- proxy::dist(temp, by_rows = TRUE, method = "Jaccard")
+obs.values$Overlap <- 1- mean(distance)
+
+degree.sp <- (specieslevel(temp, level = "lower", index = "degree"))
+degree.sp <- mean(degree.sp$degree)
+obs.values$degree <- degree.sp
+
+temp[temp != 0] <- 1 # makes a binary matrix
+rho <- 0  #level of interspecific competition
+delta <- 0.3   #level of mutualistic trade-off
+
+stab <- gamma_hat(as.matrix(temp), rho, delta) #compute the stability condition
+gamma_avg <- (trunc(stab*10^2)/10^2)/2
+obs.values$Stability <- stab
+m <- interaction_matrix(as.matrix(temp), stab/2, rho, delta) #compute the interaction matrix for rho=0 and delta=0.1 
+      #and with an average mutualsitic strength of gamma_avg = 0.1 (note that this average strength is below the stability condition)
+alpha <- m$alpha
+om <- 10^(Omega(alpha)) #compute the feasibility condition for the interaction strength matrix alpha (on a log10 scale)
+obs.values$Omega <- om^(1/(ncol(temp)))
+
+
+
+# incorporate simulations with all the range of variability (sim.com.fixed)
+str(sim.com.fixed)
+
+sim.com.random <- sim.com.fixed %>% dplyr::select(-N_pol) %>% filter(N_ind==100) %>%
+  mutate(Level=4, Level_text="Random", Inter_var=2) 
+sim.com.random %<>% dplyr::select(order(colnames(sim.com.random)))
+
+sim.com.levels <- sim.com.all %>% filter(N_ind==100) %>% 
+  mutate(Level_text = ifelse(Level == 1, "Low",
+               ifelse(Level == 2, "Medium", "High")), Inter_var=1)
+sim.com.levels %<>% dplyr::select(order(colnames(sim.com.levels)))
+
+sim.com <- rbind(sim.com.random, sim.com.levels) 
+
+sim.com$Level_text = factor(sim.com$Level_text, levels = c("High","Medium","Low","Random"))
+
+
+my_colors <- rev(RColorBrewer::brewer.pal(9, "Blues")[c(4,6,8)])
+my_colors <- c(my_colors, "grey50")
+
+
+# Incorporate flower number
+info.ind.all.fixed$Level <- 4
+flower.cv <- rbind(info.ind.all.fixed, info.ind)
+flower.cv <- as.data.frame(
+  as.matrix(aggregate(N_flowers ~ Level + N_ind + Iteration, flower.cv, function(x) c(sum = sum(x), cv=cv(x)))))
+str(flower.cv)
+flower.cv %<>% filter(N_ind==100)
+
+sim.com <- merge(flower.cv, sim.com, by=c("N_ind", "Level", "Iteration"))
+
+
+# CV and flower sum ~ level
+
+cv.flowers <- ggplot(sim.com, aes(x=N_flowers.cv, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.02,
+                      quantile_lines = TRUE, quantiles = 2, alpha = 0.8) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) + 
+  scale_color_manual(values = my_colors) +
+  labs(y= "Flower production per individual", x = "Coefficient of variation in the number of flowers") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm"))
+
+sum.flowers <- ggplot(sim.com, aes(x=N_flowers.sum, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 1,
+                      quantile_lines = TRUE, quantiles = 2, alpha = 0.8) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) + 
+  scale_color_manual(values = my_colors) +
+  labs(y= "Flower production per individual", x = "Total number of flowers produced per individual") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm"))
+
+sum.flowers + cv.flowers + plot_annotation(tag_levels = 'A')
+
+
+
+
+con.level.plot <- ggplot(sim.com, aes(x=connectance, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.0025,
+                      quantile_lines = TRUE, quantiles = 2, alpha = 0.8) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) + 
+  scale_color_manual(values = my_colors) +
+  labs(y= "", x = "Connectance") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm")) + 
+  geom_vline(xintercept = obs.values$connectance, 
+             color="grey50", linetype = "dashed", size=0.8)
+
+
+
+
+
+#con.level.plot + nodf.level.plot + feas.level.plot + stab.level.plot
+
+
+data.levels <- merge(dplyr::filter(degree.sp.all, N_ind==100), sim.com.levels, by=c("Iteration", "Level", "N_ind"))
+data.random <- merge(dplyr::filter(degree.sp.all.fixed, N_ind==100), sim.com.random, by=c("Iteration", "N_ind"))
+data.all <- rbind(data.levels, data.random)
+
+
+str(data.all)
+data.all <- aggregate(cbind(degree, obs_NODF,
+                         connectance, Overlap, Omega) ~ 
+                     Iteration + Level + Inter_var + Level_text, data.all, mean)
+data.all$Level_text = factor(data.all$Level_text, levels = c("High","Medium","Low","Random"))
+
+
+nodf.feas.plot <- data.all %>% ggplot(aes(x=obs_NODF, y=Omega)) + 
+  geom_point(alpha=0.7, 
+             aes(fill=as.factor(Level_text), color=as.factor(Level_text))) + 
+  geom_smooth(method = "lm", colour="#08519C") +
+  theme_bw(base_size = 12) +
+  scale_fill_manual(values = my_colors, name="Flower production \nper individual") +  
+  scale_color_manual(values = my_colors, name="Flower production \nper individual") + 
+  labs(y= "Feasibility", x = "Nestedness (NODF)") + 
+  guides(color = guide_legend(override.aes = list(size = 3))) + 
+  theme(legend.title = element_text(size=10, face = "bold"), legend.position = "none")
+
+nodf.level.plot <- ggplot(data.all, aes(x=obs_NODF, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.4,
+                      alpha = .8, quantile_lines = TRUE, quantiles = 2) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) +  
+  scale_color_manual(values = my_colors) + 
+  labs(y= "", x = "Nestedness (NODF)") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm")) +
+  scale_y_discrete(expand = expansion(add = c(.5, 2)))
+
+
+data.all %<>% mutate(Omega=range01(Omega))
+feas.level.plot <- ggplot(data.all, aes(x=Omega, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.03,
+                      alpha = .8, quantile_lines = TRUE, quantiles = 2) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) +  
+  scale_color_manual(values = my_colors) + 
+  labs(y= "Flower production per individual", x = "Feasibility") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm")) +
+  scale_y_discrete(expand = expansion(add = c(.5, 2)))
+
+overlap.level.plot <- ggplot(data.all, aes(x=Overlap, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.003,
+                      alpha = .8, quantile_lines = TRUE, quantiles = 2) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) +  
+  scale_color_manual(values = my_colors) + 
+  labs(y= "", x = "Overlap among plant species") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm")) +
+  scale_y_discrete(expand = expansion(add = c(.5, 2))) +
+  scale_x_continuous(breaks = seq(from = 0.05, to =0.2, by = 0.05))
+
+degree.level.plot <- ggplot(data.all, aes(x=degree, y=as.factor(Level_text), 
+                       fill=as.factor(Level_text), color=as.factor(Level_text))) +
+  stat_density_ridges(bandwidth = 0.2,
+                      alpha = .8, quantile_lines = TRUE, quantiles = 2) +
+  theme_bw(base_size = 12) + scale_fill_manual(values = my_colors) +  
+  scale_color_manual(values = my_colors) + 
+  labs(y= "", x = "Plant species-level degree") +
+  theme(legend.position = "none", plot.margin = margin(0.3,0.3,0.3,0.3, "cm")) +
+  scale_y_discrete(expand = expansion(add = c(.5, 1.5)))
+
+
+model.test <- lm(Omega ~ obs_NODF, data.all)
+summary(model.test)
+
+
+ggarrange(feas.level.plot, 
+          nodf.level.plot, 
+          ggarrange(degree.level.plot, overlap.level.plot, ncol = 1, align = "h", widths = c(1.5,2)),
+      ncol = 3, 
+      heights = c(1.5, 1, 1), labels = c("A","B","C"))
+
+ggarrange(ggarrange(feas.level.plot, 
+          nodf.level.plot, 
+          ggarrange(degree.level.plot, overlap.level.plot, ncol = 1, align = "h", widths = c(1.5,2)),
+      ncol = 3, 
+      heights = c(1.5, 1, 1), labels = c("A","B","C")),
+      nodf.feas.plot, ncol = 1, labels = c("","D"))
+
+
+hist(data.all$Omega)
+data.all %>% group_by(as.factor(Level)) %>% summarise_at(c("degree", "Overlap", "Omega", "obs_NODF"), mean)
+test <- lm(Omega ~ as.factor(Inter_var), data.all)
+summary(test)
+plot(test)
+test.av <- aov(test)
+tukey.test <- TukeyHSD(test.av)
+
+test <- lm(Omega ~ obs_NODF, data.all)
+summary(test)
+plot(test)
+
+```
+
+
+# SEM
+
+
+```{r}
+
+
+data.all %<>% mutate(across(c(obs_NODF, connectance, Overlap, Omega, degree), range01))
+str(data.all)
+#test1[test1 == 0] <- 0.0000000001
+
+data.all.levels <- data.all %>% filter(Inter_var=="1")
+hist((data.all.levels$obs_NODF))
+
+# testing the effects of the range of flower production
+model <- psem(lm(degree ~ Level, data.all.levels),
+              lm(Overlap ~ Level, data.all.levels), 
+              lme(connectance ~ degree, random = ~ 1 |Level, data.all.levels),
+              lme(obs_NODF ~ degree + Overlap, random = ~ 1 |Level, data.all.levels),
+              lme(Omega ~ obs_NODF + degree + Overlap, random = ~ 1 |Level, data.all.levels),
+              Overlap %~~% degree,
+              obs_NODF %~~% connectance,
+              connectance %~~% Overlap,
+              connectance %~~% Omega)
+
+summary(model, .progressBar = F)
+
+plot(model)
+piecewiseSEM::sem.fit(model)
+
+# testing the effects of the level of inter-individual variation in flower production
+
+data.all.inter <- data.all %>%
+  group_by(Level) %>% 
+  nest() %>%            
+  ungroup() %>% 
+  arrange(Level) %>% 
+  mutate(n = c(30, 30, 30, 90)) %>% 
+  mutate(samp = map2(data, n, sample_n)) %>% 
+  dplyr::select(-data) %>%
+  unnest(samp)
+
+model <- psem(lm(degree ~ Inter_var, data.all.inter),
+              lm(Overlap ~ Inter_var, data.all.inter), 
+              lme(connectance ~ degree, random = ~ 1 |Level, data.all.inter),
+              lme(obs_NODF ~ degree + Overlap, random = ~ 1 |Level, data.all.inter),
+              lme(Omega ~ obs_NODF + degree + Overlap, random = ~ 1 |Level, data.all.inter),
+              Overlap %~~% degree,
+              obs_NODF %~~% connectance,
+              connectance %~~% Overlap,
+              connectance %~~% Omega)
+
+summary(model, .progressBar = F)
+
+plot(model)
+piecewiseSEM::sem.fit(model)
+
+#Overall
+
+flower.sum.cv <- rbind(info.ind.all.fixed, info.ind)
+flower.sum.cv <- as.data.frame(
+  as.matrix(aggregate(N_flowers ~ Level + N_ind + Iteration, flower.sum.cv, function(x) c(mean = mean(x), cv=var(x)))))
+str(flower.sum.cv)
+flower.sum.cv %<>% filter(N_ind==100)
+
+flower.sum.cv <- merge(data.all, flower.sum.cv, by=c("Level", "Iteration"))
+flower.sum.cv %<>% mutate(across(c(N_flowers.mean, N_flowers.cv), range01))
+
+
+flower.sum.cv <- flower.sum.cv %>%
+  group_by(Level) %>% 
+  nest() %>%            
+  ungroup() %>% 
+  arrange(Level) %>% 
+  mutate(n = c(15, 15, 15, 15)) %>% 
+  mutate(samp = map2(data, n, sample_n)) %>% 
+  dplyr::select(-data) %>%
+  unnest(samp)
+
+model <- psem(lm(degree ~ N_flowers.mean + N_flowers.cv, flower.sum.cv),
+              lm(Overlap ~ N_flowers.mean + N_flowers.cv, flower.sum.cv),
+              lm(obs_NODF ~ degree + Overlap, flower.sum.cv),
+              lm(Omega ~ obs_NODF + degree + Overlap, flower.sum.cv),
+              Overlap %~~% degree,
+              N_flowers.mean %~~% N_flowers.cv)
+
+summary(model, .progressBar = F)
+
+plot(model)
+
+system.time(
+  sem.boot <- bootEff(model, R = 100, seed = 13, parallel = "no")
+)
+(sem.eff <- semEff(sem.boot))
+
+```
+
+
+# Example
+
+```{r}
+
+d <- dplyr::select(as.data.frame(random.flower.sim.all[[5]][[1]]), -Plant_sp, -Iteration, -Level)
+
+web <- d %>% dplyr::select_if(colSums(.) != 0) 
+web <- as.matrix(web[,1:dim(web)[2]])
+
+rownames(web) <- as.data.frame(random.flower.sim.all[[1]][[1]])$Plant_sp
+
+web[web != 0] <- 1
+
+rho <- 0    #level of interspecific competition
+delta <- 0.1   #level of mutualistic trade-off
+
+gamma_hat(web, rho, delta) #compute the stability condition for rho=0 and delta=0.1
+
+m <- interaction_matrix(as.matrix(web), gamma_avg = 0.1, rho, delta) #compute the interaction matrix for rho=0 and delta=0.1 
+#and with an average mutualsitic strength of gamma_avg = 0.1 (note that this average strength is below the stability condition)
+alpha <- m$alpha
+
+Omega(alpha) #compute the feasibility condition for the interaction strength matrix alpha (on a log10 scale)
+
+
+
+devtools::install_github("clsong/feasoverlap")
+library(feasoverlap)
+
+# generate two random interaction matrices
+set.seed(1)
+A <- interaction_matrix_random(num = 4, stren = 0.4, conne = 1)
+set.seed(2)
+B <- interaction_matrix_random(num = 4, stren = 0.4, conne = 1)
+
+calculate_omega(A) # relative size of interaction matrix
+#> [1] 0.4895205
+calculate_omega_overlap(A, A) # overlap between the same matrix
+#> [1] 0.4895205
+
+calculate_omega(web)
+
+```
+

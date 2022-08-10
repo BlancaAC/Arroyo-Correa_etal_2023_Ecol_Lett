@@ -1,0 +1,1118 @@
+---
+title: "CV-Skew-Kurt"
+output: html_document
+date: '2022-05-25'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+
+```{r packages}
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(igraph)
+library(magrittr)
+library(bipartite)
+library(igraph)
+
+library(r2d3)
+library(purrr) 
+library(tidyr) 
+library(stringr)
+library(tibble)
+library(RColorBrewer)
+library(scales)
+
+library(raster)
+library(viridis)
+library(ggridges)
+library(BBmisc)
+
+library(lubridate)
+library(spaa)
+library(asbio)
+library(pscl)
+library(boot)
+library(lmerTest)
+library(lme4)
+library(moments)
+
+library(tidySEM)
+library(lavaan)
+library(lavaanPlot)
+library(IDPmisc)
+
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(sjstats)
+library(visreg)
+library(patchwork)
+library(gridExtra)
+library(data.table)
+library(lme4)
+library(lmerTest)
+
+```
+
+# Read data
+
+The interaction matrix with standardized data is called 'total.int.mat' and it is constructed in the interaction-data-standardization' file. This is the interaction matrix including both video data and transect data.
+The 'id' dataset containing information on individual plants was also previously read.
+
+
+I need to check NAs produced in calculation of metrics
+
+```{r node.level.metrics}
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+total.int.mat <- read.csv("Data/complete_interaction_matrix.csv", sep=",")
+ag.int.mat <- read.csv("Data/community_aggregated_matrix.csv", sep=",")
+
+# Distribution of individual plants per species and plot
+x <- aggregate(Plant_id ~ Plot + Plant_sp, plant.id, length)
+x <- dcast(x, Plot ~ Plant_sp)
+rownames(x) <- x[,1]
+x[,1] <- NULL
+x[is.na(x)] <- 0
+x.tot <- colSums(x)
+x <- rbind(x, x.tot)
+
+
+# Color palettes
+cols <- data.frame(Plant_sp = sort(unique(unique(plant.id$Plant_sp))), 
+                   stringsAsFactors = F)
+
+cols2 <- cbind(cols, data.frame(color = c("#a6cee3",
+"#1f78b4",
+"#b2df8a",
+"#33a02c",
+"#fb9a99",
+"#e31a1c",
+"#fdbf6f",
+"#ff7f00",
+"#cab2d6",
+"#6a3d9a",
+"grey50")))
+
+cols2 <- cbind(cols, data.frame(color = c("cadetblue3", "dodgerblue3",
+                                          "burlywood2", 
+                                          "lightpink1", "brown2", 
+                                          "darkolivegreen3", "forestgreen", 
+                                          "orange", "darkorange2", "gray70", 
+                                          "burlywood4")))
+cols2 %<>% filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% droplevels() %>% as.data.frame()
+
+cols2 <- setNames((cols2$color), cols2$Plant_sp)
+
+complete.matrix <- merge(total.int.mat, plant.id[,c(3,5)], by="Plant_id")
+
+
+```
+
+# Calculate betadiversity
+
+```{r}
+
+int.matrix <-  complete.matrix %>% 
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% dplyr::select(-Plant_id)
+
+
+# mean betadiversity
+test <- vegdist(na.omit(round(dplyr::select(int.matrix, -Plant_sp)*1000)),
+                  method="bray")
+test2<- meandist(test, int.matrix$Plant_sp)
+
+mean(diag(test2))
+sd(diag(test2))
+
+
+
+
+community.mds <- metaMDS(comm = round(dplyr::select(int.matrix, -Plant_sp)*1000),
+                              distance = "bray",
+                              trace = FALSE, autotransform = FALSE)
+
+plot(community.mds$points, pch = 16, )
+
+
+test.NMDS <- na.omit(round(dplyr::select(int.matrix, -Plant_sp)*1000))
+
+set.seed(1234)
+NMDS.model <- metaMDS(test.NMDS, distance = "bray", trace = FALSE, autotransform = FALSE)
+plot(NMDS.model)
+stressplot(NMDS.model)
+
+data.scores <- as.data.frame(scores(NMDS.model))  #Using the scores function from vegan to extract the site scores and convert to a data.frame
+
+data.scores$Species <- int.matrix$Plant_sp
+head(data.scores)
+data.scores$Species <- as.factor(data.scores$Species)
+
+
+ggplot() +  
+  geom_point(data=data.scores,aes(x=NMDS1,y=NMDS2,colour=Species),size=1.5) + # add the point markers
+  scale_color_manual(values=alpha(cols2, 0.8)) +
+  theme_light() + xlim(-1.6,-0.4) + ylim(-0.4,0.4) 
+
+
+# Are centroids different?
+a <- vegan::adonis(dplyr::select(int.matrix, -Plant_sp) ~ int.matrix$Plant_sp, int.matrix, method = "bray")
+
+# adonis works by first finding the centroids for each group and then calculates the squared deviations of each of site to that centroid. Then significance tests are performed using F-tests based on sequential sums of squares from permutations of the raw data.
+
+# Is the spread different?
+
+b <- betadisper(vegdist(dplyr::select(int.matrix, -Plant_sp) , method = "bray"), group = int.matrix$Plant_sp)
+anova(b)
+boxplot(b)
+TukeyHSD(b)
+
+#mvabund
+boxplot(dplyr::select(int.matrix, -Plant_sp),horizontal = TRUE,las=2, main="Abundance")
+meanvar.plot(dplyr::select(int.matrix, -Plant_sp), xlab = "mean", ylab = "variance")
+x <- mvabund(round(dplyr::select(int.matrix, -Plant_sp)*1000))
+
+mod1 <- manyglm(x ~ int.matrix$Plant_sp, family="negative_binomial")
+plot(mod1)
+
+anova(mod1)
+anova(mod1, p.uni="adjusted")
+
+```
+
+
+# Calculate individual-level metrics
+
+Topological metrics were calculated for each individual plant within its individual-based network.
+
+```{r ind.metrics}
+
+matrix.per.sp <- split(complete.matrix, complete.matrix$Plant_sp)
+matrix.per.sp2 <- lapply(matrix.per.sp, function(i) i %>% dplyr::select(-Plant_sp))
+
+metrics.per.sp <- list()
+
+
+for (i in 1:length(matrix.per.sp2)) {
+  temp <- matrix.per.sp2[[i]][, -1] # remove Plant_id column
+  temp <- round(temp*1000, 0)
+  temp %<>% select_if(colSums(.) != 0) # remove non interacting pollinators
+  
+  # Calculate node-level metrics
+  temp2 <- specieslevel(temp, 
+                       level = "lower", index = c("degree", "species strength", "closeness")) 
+  
+  temp2$weighted.degree <- rowSums(temp)
+  
+  # Niche overlap
+  temp.mat <- matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])]
+  row.names(temp.mat) <- matrix.per.sp2[[i]]$Plant_id
+  jaccard.index <- as.matrix(proxy::simil(temp.mat, method = "bray"))
+  jaccard.index <- melt(jaccard.index, varnames = c("ind_1", "ind_2"))
+  jaccard.index <- aggregate(value ~ ind_1, jaccard.index, mean)
+  
+  temp2$niche.overlap <- jaccard.index$value
+  
+  # Partner evenness
+  H <- vegan::diversity(matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])])
+  S <- vegan::specnumber(matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])])
+  J <- H/log(S)
+  
+  temp2$evenness <- J
+
+  temp2$Plant_id <- matrix.per.sp2[[i]]$Plant_id
+  metrics.per.sp[[i]] <- temp2
+}
+
+metrics <- bind_rows(metrics.per.sp)
+metrics[is.na(metrics)] <- 0
+metrics$closeness <- NULL
+names(metrics)[names(metrics) == 'species.strength'] <- 'strength'
+
+metrics <- merge(plant.id[,5, drop=FALSE], metrics, by="Plant_id", all.x=T)
+metrics[is.na(metrics)] <- 0
+
+# plot
+metrics.id.sp <- merge(metrics, plant.id[,c(3,5)], by="Plant_id")
+metrics.id.sp.long <- melt(metrics.id.sp, id.vars=c("Plant_id", "Plant_sp"))
+str(metrics.id.sp.long)
+
+
+metrics.id.sp.long <- metrics.id.sp.long %>%
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR",
+         variable %in% c("degree",
+                         "strength",
+                         "weighted.closeness",
+                         "niche.overlap")) %>% droplevels
+
+
+variable.labs <- c("Degree","Weighted Degree", "Strength", "Weighted closeness", "Specialization (d')", "Species Specificity", "PDI", "Niche overlap", "Diversity", "Evenness")
+names(variable.labs) <- c("degree","weighted.degree", "strength", "weighted.closeness", "d", "species.specificity.index", "PDI", "niche.overlap", "diversity", "evenness")
+
+
+
+#### separate plots
+
+metrics.id.sp.new <- metrics.id.sp %>% 
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% mutate(across(c(niche.overlap), na_if, 0)) %>% mutate(weighted.closeness = ifelse(weighted.closeness < 0.15, weighted.closeness, NA) )
+
+# normalised degree
+df.d <- metrics.id.sp.new %>% 
+  filter(degree > 0) %>%
+  group_by(Plant_sp) %>%
+  summarise(mean = mean(degree))
+
+plot.degree <- metrics.id.sp.new %>% 
+  ggplot(aes(x=degree, fill=Plant_sp, color=Plant_sp)) +
+  geom_density(aes(y=..count.. * 1), alpha=0.4)  +
+  geom_histogram(aes(y = ..count..),  binwidth = 1, alpha=0.7, color=NA) +
+  geom_vline(data = df.d, mapping = aes(xintercept=mean, color=Plant_sp),
+             linetype="dashed")  +
+  facet_grid(cols = vars(Plant_sp)) +
+  theme(legend.position="none") + theme_minimal() + 
+  theme(legend.position = "none", strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), face = "bold")) + 
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + xlab("Degree") 
+
+# strength
+df.s <- metrics.id.sp.new %>% 
+  filter(strength > 0) %>%
+  group_by(Plant_sp) %>%
+  summarise(mean = mean(strength))
+
+plot.strength <- metrics.id.sp.new %>% 
+  ggplot(aes(x=strength, fill=Plant_sp)) +
+  geom_histogram(aes(y = ..count..), binwidth = 0.05, alpha=0.8) +
+  geom_density(aes(y=..count.. * 0.05), alpha=0.5, color=NA ) +
+  geom_vline(data = df.s, mapping = aes(xintercept=mean, color=Plant_sp),
+             linetype="dashed") +
+  facet_grid(rows = vars(Plant_sp)) +
+  theme(legend.position="none") + theme_minimal() + 
+  theme(legend.position = "none", strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), face = "bold")) + 
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + xlab("Strength")
+
+# closeness
+df.c <- metrics.id.sp.new %>% 
+  filter(weighted.closeness > 0) %>%
+  group_by(Plant_sp) %>%
+  summarise(mean = mean(weighted.closeness))
+
+plot.closeness <- metrics.id.sp.new %>% 
+  ggplot(aes(x=weighted.closeness, fill=Plant_sp)) +
+  geom_histogram(aes(y = ..count..),  binwidth = 0.002, alpha=0.8) +
+  geom_density(aes(y=..count.. * 0.002), alpha=0.5, color=NA ) +
+  geom_vline(data = df.c, mapping = aes(xintercept=mean, color=Plant_sp),
+             linetype="dashed") +
+  facet_grid(rows = vars(Plant_sp)) +
+  theme(legend.position="none") + theme_minimal() + 
+  theme(legend.position = "none", strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), face = "bold")) + 
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + xlab("Weighted closeness") 
+
+# niche overlap
+df.no <- metrics.id.sp.new %>% 
+  filter(niche.overlap > 0) %>%
+  group_by(Plant_sp) %>%
+  summarise(mean = mean(niche.overlap))
+
+plot.niche.overlap <- metrics.id.sp.new %>% 
+  ggplot(aes(x=niche.overlap, fill=Plant_sp, color=Plant_sp))  +
+  geom_density(aes(y=..count.. * 0.01), alpha=0.4) +
+  geom_histogram(aes(y = ..count..), binwidth = 0.01, alpha=0.7, color=NA) +
+  geom_vline(data = df.no, mapping = aes(xintercept=mean, color=Plant_sp),
+             linetype="dashed") +
+  facet_grid(cols = vars(Plant_sp)) +
+  theme(legend.position="none") + theme_minimal() + 
+  theme(legend.position = "none", strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), face = "bold")) + 
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + xlab("Niche overlap")
+
+
+
+## All plots
+
+plot.distr <- plot.degree + plot.niche.overlap + plot.strength + plot.closeness + 
+  plot_layout(ncol = 4)
+
+plot.distr[[1]] = plot.distr[[1]] + theme(legend.position="none", 
+                                          strip.text.y = element_blank()) + ylab("Count")
+plot.distr[[2]] = plot.distr[[2]] + 
+            theme(legend.position="none", axis.title.y = element_blank(),
+                  strip.text.y = element_blank()) + 
+  scale_y_continuous(limits = c(0, 14), breaks = seq(0, 14, by = 4)) 
+plot.distr[[3]] = plot.distr[[3]] + 
+            theme(legend.position="none", axis.title.y = element_blank(),
+                  strip.text.y = element_blank()) + 
+  scale_y_continuous(limits = c(0, 22), breaks = seq(0, 22, by = 4))
+plot.distr[[4]] = plot.distr[[4]] + 
+            theme(axis.title.y = element_blank(), axis.ticks.y = element_blank())  + 
+  scale_y_continuous(limits = c(0, 30), breaks = seq(0, 30, by = 5)) 
+
+## Degree and niche overlap plots
+
+plot.distr <- plot.degree + plot.niche.overlap + 
+  plot_layout(ncol = 1)
+
+plot.distr[[1]] = plot.distr[[1]] + theme(legend.position="none", 
+                                          strip.text.y = element_blank()) + ylab("Count")
+plot.distr[[2]] = plot.distr[[2]] + 
+            theme(legend.position="none", 
+                  strip.text.y = element_blank()) + ylab("Count") +
+  scale_x_continuous(breaks = seq(from = 0.5, to =0.7, by = 0.1))
+
+
+```
+
+# Association overlap and degree (nestedness of individual-based networks)
+
+```{r overlap.degree}
+
+ggplot(metrics.id.sp.new, aes(x=degree, y=niche.overlap)) +
+  geom_point(aes(x=degree, y=niche.overlap, color=Plant_sp)) + 
+  geom_smooth(aes(x=degree, y=niche.overlap, color=Plant_sp)) +
+  theme_minimal() + ylab("Overlap in pollinator use") + xlab("Degree") +
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + 
+  theme(strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), face = "bold"))
+
+rank <- nestedrank(matrix.per.sp2[[2]][,-1], method = "NODF", weighted=F, normalise=TRUE, return.matrix=FALSE)
+
+rank <- as.data.frame(rank$`lower level`)
+
+degree <- specieslevel(matrix.per.sp2[[2]][,-1], level = "lower", index = "degree") 
+
+degree.rank <- merge(rank, degree, by=0)
+
+plot(degree.rank[,3], degree.rank[,2])
+
+web <- matrix.per.sp2[["LPED"]][,-1]
+web[web > 0] <- 1 
+web %<>% select_if(colSums(.) != 0)
+obs.nodf <- nested(as.matrix(web), method="NODF")
+null <- bipartite::nullmodel(as.matrix(web), N=500, method="vaznull") # null model
+null.nodf <- sapply(null, nested, method="NODF")
+z.wnodf <- (obs.nodf - mean(null.nodf))/sd(null.nodf)
+sum(null.nodf > obs.nodf) / length(null.nodf)
+hist(null.nodf)
+visweb(web, type="nested")
+
+```
+
+
+# Resampling of individuals (individual-based networks) to calculate robustness of CV, skewness and kurtosis as a function of population size.
+
+```{r resampling}
+
+matrix.per.sp2[["CSAL"]] <- NULL
+matrix.per.sp2[["UPAR"]] <- NULL
+
+
+### generation of random samples of individuals
+random.all <- list()
+for(l in seq_along(matrix.per.sp2)){
+output <- list()
+for(k in 2:nrow(matrix.per.sp2[[l]])){
+  output[[k]] <- lapply(1:100, function(x) 
+    matrix.per.sp2[[l]][sample(nrow(matrix.per.sp2[[l]]), size = k, replace = F),])
+  for (j in seq_along(output)){
+    for (i in seq_along(output[[j]])) {
+    output[[j]][[i]]$N_ind <- nrow(output[[j]][[i]])
+    output[[j]][[i]]$N_ind <- as.factor(output[[j]][[i]]$N_ind)
+    output[[j]][[i]]$Plant_id <- as.factor(output[[j]][[i]]$Plant_id)
+    }
+  }
+}
+output[sapply(output, is.null)] <- NULL # remove elements that should contain 1 individual
+random.all[[l]] <- output
+names(random.all)[[l]] <- names(matrix.per.sp2)[[l]]
+}
+
+
+#### calculate individual-level metrics from these samples
+pb <- txtProgressBar(0, length(random.all), style = 3)
+z <- vector('list', length(random.all)) 
+
+for (k in seq_along(random.all)){
+  y <- vector('list', length(random.all[[k]]))
+  for (j in seq_along(random.all[[k]])){
+  x <- list()
+    for (i in seq_along(random.all[[k]][[j]])) {
+      temp <- dplyr::select_if(random.all[[k]][[j]][[i]], is.numeric)
+      temp <- round(temp*1000, 0)
+      temp %<>% select_if(colSums(.) != 0) 
+      if(ncol(temp)>1) {
+        if(nrow(temp)>1) {
+      temp2 <- specieslevel(temp, 
+                       level = "lower", index = c("degree")) 
+       # Niche overlap 
+      simil.index <- as.matrix(proxy::simil(temp, method = "Jaccard"))
+      simil.index <- melt(simil.index, varnames = c("ind_1", "ind_2"))
+      simil.index <- aggregate(value ~ ind_1, simil.index, mean)
+  
+      temp2$niche.overlap <- simil.index$value
+      
+      x[[i]] <- temp2
+      x[[i]]$N_ind <- random.all[[k]][[j]][[i]][1, "N_ind"] #number of individuals
+      x[[i]]$Iteration <- i # iteration number
+      }}}
+
+  y[[j]]  <- do.call(rbind, x)
+  y[[j]]$Plant_sp <- names(random.all)[[k]]
+}
+  z[[k]] <- y
+  setTxtProgressBar(pb, k)
+}
+
+close(pb)
+
+z[[1]]
+list <- unlist(z, recursive = FALSE)
+test1 <- do.call("rbind", list)
+str(test1)
+
+#write.csv(test1,"Data/random_sampling_simulations.csv", row.names = FALSE)
+#test1 <- read.csv("Data/random_sampling_simulations.csv", sep=",")
+
+# calculate mean, sd and cv of all topological metrics
+test1 <- test1 %>% 
+  rename(nicheoverlap=niche.overlap)
+str(test1)
+test2 <- as.data.frame(
+  as.matrix(aggregate(cbind(degree, nicheoverlap) ~ Plant_sp + Iteration + N_ind, test1, function(x) c(cv=raster::cv(x), skew=skewness(x), kurt=kurtosis(x)))))
+
+test3 <- melt(test2, id.vars=c("Plant_sp", "Iteration", "N_ind")) 
+test3 %<>% separate(variable, into=c("metric", "measure")) %>%
+  na.omit()
+test3$value <- as.numeric(test3$value)
+
+# calculate mean and sd of CV, skewness and kurtosis
+test4 <- as.data.frame(
+  as.matrix(aggregate(value ~ N_ind + Plant_sp + metric + measure, test3, function(x) c(mean=mean(x, na.rm=T), sd=sd(x)))))
+
+str(test4)
+test4 %<>% mutate(across(-c("Plant_sp", "metric", "measure"), as.numeric))
+
+metric.labs <- c("Degree", "Niche overlap", "Strength", "Weighted closeness")
+names(metric.labs) <- c("degree", "nicheoverlap", "strength", "weightedcloseness")
+measure.labs <- c("CV", "Skewness", "Kurtosis")
+names(measure.labs) <- c("cv", "skew", "kurt")
+
+ggplot(test4, aes(x=N_ind, y=value.mean)) +
+  geom_line(aes(x=N_ind, y=value.mean, color=Plant_sp)) +
+  geom_ribbon(aes(ymin=value.mean - value.sd,
+                  ymax=value.mean + value.sd, 
+                  fill=Plant_sp), alpha=0.4) +
+  theme_minimal() + ylab("Value") + xlab("Number of individuals") +
+  facet_grid(rows = vars(measure), cols = vars(metric), scales="free",
+  labeller = labeller(measure = measure.labs, metric = metric.labs)) +
+  scale_fill_manual(values= cols2) + 
+  scale_color_manual(values= cols2) + 
+  theme(strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), face = "bold"))
+
+
+
+```
+
+# Estimation CV and threshold for each species
+
+```{r cv.sim}
+
+test5 <- test4 %>% filter(value.sd <= 0.05) %>% group_by(Plant_sp, measure, metric) %>% summarise(min=min(N_ind), mean=mean(value.mean))
+
+str(test5)
+test5 %<>% group_by(measure, metric) %>% summarise_at(vars(min), c(mean=mean, sd=sd))
+
+
+# another way
+min.all.metrics.long <- melt(min.all.metrics,
+    id.vars="Plant_sp",
+    measure.vars=c("min_nd", "min_st", "min_wc", "min_no"),
+    variable.name="metric",
+    value.name="value"
+)
+
+min.all.metrics.long %>% group_by(metric) %>% summarise_if(is.numeric, c(mean=mean, sd=sd))
+
+
+```
+
+
+# Plant traits
+
+```{r traits}
+
+non.recorded.plants <- read.csv("Data/RBD_interaction_data_20220307.csv", sep=";")
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+recorded.plants <- read.csv("Data/RBD_video_processing_20220307.csv", sep=";")
+
+flower.data.1 <- unique(dplyr::select(non.recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+flower.data.2 <- unique(dplyr::select(recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+
+flower.data <- rbind(flower.data.1, flower.data.2)
+flower.data$N_flowers <- as.numeric(flower.data$N_flowers)
+
+# total number of flowers
+
+flower.data <- aggregate(N_flowers ~ Plant_id + Plant_sp + Plot, flower.data, sum)
+
+flower.data <- merge(flower.data, plant.id, by=c("Plant_id", "Plant_sp", "Plot"), all.x = T)
+
+flower.data$Plant_id[duplicated(flower.data$Plant_id)]
+
+
+plant.area <- read.csv("Data/Plant_traits/Plant_size/individual_plant_area.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Area_m2)
+
+plant.height <- read.csv("Data/Plant_traits/Plant_size/individual_plant_height.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Height_cm)
+
+plant.traits <- merge(plant.id, flower.data[, c(1,4)], by="Plant_id", all.x=T)
+plant.traits[is.na(plant.traits)] <- 0
+
+plant.traits <- merge(plant.traits, plant.area, by="Plant_id")
+plant.traits <- merge(plant.traits, plant.height, by="Plant_id")
+
+cor.test(plant.traits$Area_m2, plant.traits$Height_cm)
+plot(plant.traits$Area_m2, plant.traits$Height_cm)
+
+cor.test(plant.traits$Area_m2, plant.traits$N_flowers)
+plot(plant.traits$Area_m2, plant.traits$N_flowers)
+
+cor.test(plant.traits$Height_cm, plant.traits$N_flowers)
+plot(plant.traits$Height_cm, plant.traits$N_flowers)
+
+# Flowering synchrony
+synchrony.index <- read.csv("Data/Plant_traits/flowering_synchrony_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, synchrony.index[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+all.data <- merge(plant.traits, metrics, by="Plant_id")
+
+plant.traits[rowSums(is.na(plant.traits)) > 0, ]
+
+# Neighbourhood cover
+cover.neigh <- read.csv("Data/Plant_traits/neighbourhood_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, cover.neigh[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+#write.csv(plant.traits,"Data/all_plant_traits.csv", row.names = FALSE)
+
+all.plant.data <- merge(plant.traits, metrics, by="Plant_id")
+
+
+
+```
+
+
+# Skewness and kurtosis
+
+To characterize the distribution of het-individual plant variation in several metrics (degree, strength, weighted closenss and specialization) I will calculate the skewness and kurtosis values. Skewness measures the asymmetry of the distribution or dataset. It tells about the position of the majority of data values in the distribution around the mean value. Kurtosis  measures the sharpness of the peak in the data distribution.
+
+# Skewness and kurtosis significance tests
+
+```{r distributions}
+
+
+
+# Split into plant species to test for significance in skewness and kurtosis
+metrics.sp.list <- group_split(metrics.id.sp.new, Plant_sp)  %>%
+  setNames(sort(unique(metrics.id.sp.new$Plant_sp)))
+
+## Degree
+# skewness
+agostino.test(metrics.sp.list[["AVEL"]]$degree)
+agostino.test(metrics.sp.list[["CLIB"]]$degree)
+agostino.test(metrics.sp.list[["HCOM"]]$degree)
+agostino.test(metrics.sp.list[["HHAL"]]$degree)
+agostino.test(metrics.sp.list[["HPIC"]]$degree)
+agostino.test(metrics.sp.list[["LPED"]]$degree)
+agostino.test(metrics.sp.list[["ROFF"]]$degree)
+agostino.test(metrics.sp.list[["SGEN"]]$degree)
+agostino.test(metrics.sp.list[["TMAS"]]$degree)
+# kurtosis
+anscombe.test(metrics.sp.list[["AVEL"]]$degree)
+anscombe.test(metrics.sp.list[["CLIB"]]$degree)
+anscombe.test(metrics.sp.list[["HCOM"]]$degree)
+anscombe.test(metrics.sp.list[["HHAL"]]$degree)
+anscombe.test(metrics.sp.list[["HPIC"]]$degree)
+anscombe.test(metrics.sp.list[["LPED"]]$degree)
+anscombe.test(metrics.sp.list[["ROFF"]]$degree)
+anscombe.test(metrics.sp.list[["SGEN"]]$degree)
+anscombe.test(metrics.sp.list[["TMAS"]]$degree)
+
+## Strength
+# skewness
+agostino.test(metrics.sp.list[["AVEL"]]$strength)
+agostino.test(metrics.sp.list[["CLIB"]]$strength)
+agostino.test(metrics.sp.list[["HCOM"]]$strength)
+agostino.test(metrics.sp.list[["HHAL"]]$strength)
+agostino.test(metrics.sp.list[["HPIC"]]$strength)
+agostino.test(metrics.sp.list[["LPED"]]$strength)
+agostino.test(metrics.sp.list[["ROFF"]]$strength)
+agostino.test(metrics.sp.list[["SGEN"]]$strength)
+agostino.test(metrics.sp.list[["TMAS"]]$strength)
+# kurtosis
+anscombe.test(metrics.sp.list[["AVEL"]]$strength)
+anscombe.test(metrics.sp.list[["CLIB"]]$strength)
+anscombe.test(metrics.sp.list[["HCOM"]]$strength)
+anscombe.test(metrics.sp.list[["HHAL"]]$strength)
+anscombe.test(metrics.sp.list[["HPIC"]]$strength)
+anscombe.test(metrics.sp.list[["LPED"]]$strength)
+anscombe.test(metrics.sp.list[["ROFF"]]$strength)
+anscombe.test(metrics.sp.list[["SGEN"]]$strength)
+anscombe.test(metrics.sp.list[["TMAS"]]$strength)
+
+## Closeness
+# skewness
+agostino.test(metrics.sp.list[["AVEL"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["CLIB"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["HCOM"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["HHAL"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["HPIC"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["LPED"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["ROFF"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["SGEN"]]$weighted.closeness)
+agostino.test(metrics.sp.list[["TMAS"]]$weighted.closeness)
+# kurtosis
+anscombe.test(metrics.sp.list[["AVEL"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["CLIB"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["HCOM"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["HHAL"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["HPIC"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["LPED"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["ROFF"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["SGEN"]]$weighted.closeness)
+anscombe.test(metrics.sp.list[["TMAS"]]$weighted.closeness)
+
+## Niche overlap
+# skewness
+agostino.test(metrics.sp.list[["AVEL"]]$niche.overlap)
+agostino.test(metrics.sp.list[["CLIB"]]$niche.overlap)
+agostino.test(metrics.sp.list[["HCOM"]]$niche.overlap)
+agostino.test(metrics.sp.list[["HHAL"]]$niche.overlap)
+agostino.test(metrics.sp.list[["HPIC"]]$niche.overlap)
+agostino.test(metrics.sp.list[["LPED"]]$niche.overlap)
+agostino.test(metrics.sp.list[["ROFF"]]$niche.overlap)
+agostino.test(metrics.sp.list[["SGEN"]]$niche.overlap)
+agostino.test(metrics.sp.list[["TMAS"]]$niche.overlap)
+# kurtosis
+anscombe.test(metrics.sp.list[["AVEL"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["CLIB"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["HCOM"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["HHAL"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["HPIC"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["LPED"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["ROFF"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["SGEN"]]$niche.overlap)
+anscombe.test(metrics.sp.list[["TMAS"]]$niche.overlap)
+
+
+# CV estimations
+
+var.mean <- as.data.frame(
+  as.matrix(aggregate(cbind(degree, strength, weighted.closeness, niche.overlap) ~ Plant_sp, metrics.id.sp.new, function(x) c(var=var(x), mean=mean(x)))))
+
+# Check if the variance scales with the mean 
+plot(var.mean$degree.mean, var.mean$degree.var)
+plot(var.mean$strength.mean, var.mean$strength.var)
+plot(var.mean$weighted.closeness.mean, var.mean$weighted.closeness.var)
+plot(var.mean$niche.overlap.mean, var.mean$niche.overlap.var)
+
+
+
+# Calculate CV, skewness and kurtosis
+ind.metrics <- metrics.id.sp.new %>% 
+  rename(nicheoverlap=niche.overlap, weightedcloseness=weighted.closeness)
+
+cv.s.k <- as.data.frame(
+  as.matrix(aggregate(cbind(degree, strength, weightedcloseness, nicheoverlap) ~ Plant_sp, ind.metrics, 
+                      function(x) c(cv=raster::cv(x), skew=skewness(x), kurt=kurtosis(x)))))
+
+cv.s.k <- melt(cv.s.k, id.vars="Plant_sp") 
+
+cv.s.k %<>% separate(variable, into=c("metric", "measure"))
+str(cv.s.k)
+cv.s.k$value <- as.numeric(cv.s.k$value)
+hline <- data.frame(measure = c("kurt", "skew"), value = c(3, 0))
+
+metric.labs <- c("Degree", "Niche overlap")
+names(metric.labs) <- c("degree", "nicheoverlap")
+measure.labs <- c("CV", "Skewness", "Kurtosis")
+names(measure.labs) <- c("cv", "skew", "kurt")
+
+ggplot(data=filter(cv.s.k, metric %in% c("degree", "nicheoverlap")), aes(x=Plant_sp, y=value)) +
+  geom_bar(position="dodge", stat="identity", aes(fill=Plant_sp), alpha=0.8) +
+  facet_grid(rows = vars(measure), cols= vars(metric), scales="free",
+  labeller = labeller(measure = measure.labs, metric = metric.labs)) +
+  theme(legend.position="none") + theme_minimal() + 
+  theme(legend.position = "none", strip.background= element_rect(color="white", fill="white"),
+        strip.text.x = element_text(size = 12, color = "black", face = "bold"),
+        strip.text.y = element_text(size = 12, color = "black", face = "bold"),
+        axis.title.y= element_text(size = 12, color = "black", face = "bold"),
+        axis.title.x = element_text(margin = margin(t = 15, r = 0, b = 0, l = 0), face = "bold")) +
+  ylab("Value") + xlab("Plant species") +
+  scale_fill_manual(values=cols2) +
+  geom_hline(data= hline, aes(yintercept=value), linetype="dashed", color = "grey50")
+
+```
+
+
+# Skewness and kurtosis analyses 
+
+To fit models in order to compare skewness and kurtosis between species I have to claculate these values for each plot separately (so I can have "replicates"). This is the skew.kurt.sp.plot file.
+
+```{r distributions.tests}
+
+# Per species
+skew.kurt.sp <- metrics.ind.distrib %>%
+  group_by(Plant_sp) %>%
+  summarise_at(c("normalised.degree", "strength", "weighted.closeness", "niche.overlap"), 
+               funs(kurtosis, skewness)) %>% mutate_if(is.numeric, round, 2)
+skew.kurt.sp %<>%
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% as.data.frame()
+
+# Per species and plot
+
+# Calculate kurtosis and skewness per plot to analyze differences between species
+skew.kurt.sp.plot <- metrics.ind.distrib %>%
+  group_by(Plant_sp, Plot) %>%
+  summarise_at(c("normalised.degree", "strength", "weighted.closeness", "niche.overlap"), 
+               funs(kurtosis, skewness)) 
+
+skew.kurt.sp.plot %<>%
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>% as.data.frame()
+
+skew.kurt.sp.plot <- na.omit(skew.kurt.sp.plot)
+
+# Plotting
+skew.kurt.sp.plot.long <- melt(skew.kurt.sp.plot, id.vars = c("Plant_sp", "Plot"))
+skew.kurt.sp.plot.long %<>% 
+  dplyr::rename(metric= variable)
+
+
+
+# Separate kurtosis and skewness in a different column
+skew.kurt.sp.plot.long <- cbind(
+  dplyr::select(skew.kurt.sp.plot.long, c("Plant_sp", "Plot", "value")), 
+  str_split_fixed(skew.kurt.sp.plot.long$metric, "_", 2))
+
+skew.kurt.sp.plot.long %<>% 
+  dplyr::rename(metric="1",
+         distr_measure="2")
+
+skew.kurt.sp.plot.long %>% 
+  ggplot(mapping=aes(x=Plant_sp, y=value, fill=distr_measure)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  facet_grid(.~ metric) + theme_bw()
+
+# mean and sd (plots as replicates)
+std <- function(x) sd(x)/sqrt(length(x))
+sum.kurt.skew <- as.data.frame(as.matrix(aggregate(. ~ Plant_sp, (skew.kurt.sp.plot)[,-2], function(x) c(mean = mean(x), se = std(x)))))
+str(sum.kurt.skew)
+
+cols_to_convert <- c(names(sum.kurt.skew[,2:17]))
+sum.kurt.skew %<>% mutate(across(all_of(cols_to_convert),
+              as.numeric)) %>% mutate_if(is.numeric, round, 2)
+
+# Plot skewness-kurtosis relationship
+
+skew.kurt.sp.plot %>% 
+  ggplot(aes((normalised.degree_skewness)^2, normalised.degree_kurtosis, color=Plant_sp)) +
+  geom_point() + theme_minimal() + 
+  scale_color_manual(values= cols2)  + geom_smooth(method = "lm", aes(group=1), color="grey70") +
+  geom_abline(slope=1, intercept=1)
+
+skew.kurt.sp.plot %>% 
+  ggplot(aes((strength_skewness)^2, strength_kurtosis, color=Plant_sp)) +
+  geom_point() + theme_minimal() + 
+  scale_color_manual(values= cols2)  + geom_smooth(method = "lm", aes(group=1), color="grey70") +
+  geom_abline(slope=1, intercept=1)
+
+skew.kurt.sp.plot %>% 
+  ggplot(aes((weighted.closeness_skewness)^2, weighted.closeness_kurtosis, color=Plant_sp)) +
+  geom_point() + theme_minimal() + 
+  scale_color_manual(values= cols2)  + geom_smooth(method = "lm", aes(group=1), color="grey70") +
+  geom_abline(slope=1, intercept=1)
+
+skew.kurt.sp.plot %>% 
+  ggplot(aes((niche.overlap_skewness)^2, niche.overlap_kurtosis, color=Plant_sp)) +
+  geom_point() + theme_minimal() + 
+  scale_color_manual(values= cols2)  + geom_smooth(method = "lm", aes(group=1), color="grey70") +
+  geom_abline(slope=1, intercept=1)
+
+```
+
+# Skewness and kurtosis - null models
+
+```{r skew.kurt.null.models}
+
+matrix.per.sp2[["CSAL"]] <- NULL
+matrix.per.sp2[["UPAR"]] <- NULL
+
+skew.kurt.null.all <- list()
+
+for(i in 1:length(matrix.per.sp2)){
+  
+  temp1 <- matrix.per.sp2[[i]] %>% dplyr::select(-Plant_id)
+  temp1 <- round(temp1*1000, 0)
+  temp1 %<>% select_if(colSums(.) != 0) # remove non interacting pollinators 
+  null <- nullmodel(temp1, N=100, method="vaznull") # null model  
+  
+  metrics.null <- lapply(null, specieslevel, 
+                       level = "lower", 
+                       index = c("normalised degree", "species strength", "closeness"))
+  
+  skew.kurt.null <- list()
+  
+  for(j in 1:length(metrics.null)){
+    
+  simil.index <- as.matrix(proxy::simil(metrics.null[[j]], method = "bray"))
+  simil.index <- melt(simil.index, varnames = c("ind_1", "ind_2"))
+  simil.index <- aggregate(value ~ ind_1, simil.index, mean)
+  
+  metrics.null[[j]]$niche.overlap <- simil.index$value
+  metrics.null[[j]]$closeness <- NULL
+  names(metrics.null[[j]])[names(metrics.null[[j]]) == 'species.strength'] <- 'strength'
+  metrics.null[[j]][is.na(metrics.null[[j]])] <- 0
+    
+  temp2 <- metrics.null[[j]] %>%
+    summarise_all(funs(kurtosis, skewness)) %>% mutate_all(as.numeric) %>% mutate_if(is.numeric, round, 2)
+  skew.kurt.null[[j]] <- temp2
+  
+  }
+   
+  skew.kurt.null.all[[i]] <- bind_rows(skew.kurt.null)
+  names(skew.kurt.null.all)[i] <- names(matrix.per.sp2)[i]
+  skew.kurt.null.all[[i]]$Plant_sp <- names(matrix.per.sp2)[i]
+  }
+  
+
+null.values <- bind_rows(skew.kurt.null.all)
+hist(null.values$normalised.degree_kurtosis)
+
+
+# Compare observed values with randomizations
+
+obs.long <- melt(skew.kurt.sp, id.vars = c("Plant_sp"))
+obs.long %<>% 
+  dplyr::rename(metric= variable)
+obs.long$Obs_null <- "observed"
+
+null.long <- melt(null.values, id.vars = c("Plant_sp"))
+null.long %<>% 
+  dplyr::rename(metric= variable)
+null.long$Obs_null <- "random"
+
+obs.null.long <- rbind(obs.long, null.long)
+
+obs.null.long$Plant_sp_metric <- paste(obs.null.long$Plant_sp,"-",obs.null.long$metric)
+str(obs.null.long)
+obs.null.long$Plant_sp_metric  <- as.factor(obs.null.long$Plant_sp_metric)
+obs.null.sign.list <- list()
+
+for (i in levels(obs.null.long$Plant_sp_metric)){
+    test.obs <- obs.null.long %>% filter(Plant_sp_metric== i & Obs_null== "observed") 
+    test.obs <- as.vector(test.obs[,3])
+    test.random <- obs.null.long %>% filter(Plant_sp_metric== i & Obs_null== "random")
+    test.random <- as.vector(test.random[,3])
+    
+    p.value.low <- sum(test.random < test.obs) / length(test.random)
+    p.value.high <- sum(test.random > test.obs) / length(test.random)
+    
+    obs.null.sign <- data.frame(matrix(ncol = 2, nrow = 1))
+    colnames(obs.null.sign) <- c("Plant_sp_metric", "P_value")
+    obs.null.sign$Plant_sp_metric <- i
+    obs.null.sign$P_value <- min(p.value.low, p.value.high)
+    
+    obs.null.sign.list[[i]] <- obs.null.sign
+}
+
+obs.null.sign <- bind_rows(obs.null.sign.list)
+obs.null.sign %<>%
+  separate(Plant_sp_metric, c("Plant_sp", "Metric"), "-") %>%
+  separate(Metric, c("Metric", "S_K"), "_")
+
+ 
+
+
+```
+
+
+# Skewness and kurtosis - differences among plant species
+
+```{r skew.kurt.tests}
+
+# Models kurtosis or skewness ~ plant sp
+hist(log(skew.kurt.sp.plot$normalised.degree_kurtosis))
+lm.degree.kurt <- lm(log(normalised.degree_kurtosis+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.degree.kurt)
+emmeans(lm.degree.kurt, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$normalised.degree_skewness))
+lm.degree.skew <- lm(log(normalised.degree_skewness+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.degree.skew)
+emmeans(lm.degree.skew, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$strength_kurtosis))
+lm.strength.kurt <- lm(log(strength_kurtosis+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.strength.kurt)
+emmeans(lm.strength.kurt, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$strength_skewness))
+lm.strength.skew <- lm(log(strength_skewness+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.strength.skew)
+emmeans(lm.strength.skew, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$weighted.closeness_kurtosis))
+lm.closeness.kurt <- lm(log(weighted.closeness_kurtosis+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.closeness.kurt)
+emmeans(lm.closeness.kurt, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$weighted.closeness_skewness))
+lm.closeness.skew <- lm(log(weighted.closeness_skewness+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.closeness.skew)
+emmeans(lm.closeness.skew, list(pairwise ~ Plant_sp), combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$niche.overlap_kurtosis))
+lm.nicheoverlap.kurt <- lm(log(niche.overlap_kurtosis+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.nicheoverlap.kurt)
+emmeans(lm.nicheoverlap.kurt, specs= pairwise ~ Plant_sp, combine = TRUE, adjust = "none")
+
+hist(log(skew.kurt.sp.plot$niche.overlap_skewness))
+lm.nicheoverlap.skew <- lm(log(niche.overlap_skewness+1) ~ Plant_sp, skew.kurt.sp.plot)
+summary(lm.nicheoverlap.skew)
+emmeans(lm.nicheoverlap.skew, specs= pairwise ~ Plant_sp, combine = TRUE, adjust = "none")
+
+
+tab_model(
+  lm.degree.kurt, lm.degree.skew, 
+  lm.strength.kurt, lm.strength.skew,
+  lm.closeness.kurt, lm.closeness.skew,
+  lm.nicheoverlap.kurt, lm.nicheoverlap.skew,
+  dv.labels = c("Degree (kurtosis)", "Degree (skewness)", 
+                "Strength (kurtosis)", "Strength (skewness)",
+                "Weighted closeness (kurtosis)", "Weighted closeness (skewness)",
+                "Niche overlap (kurtosis)", "Niche overlap (skewness)"),
+  pred.labels = c("Intercept", "CLIB", "HCOM", "HHAL","HPIC", "LPED", "ROFF", "SGEN","TMAS"),
+  string.pred = "Coefficient",
+  string.ci = "CI (95%)",
+  string.est = "Estimate",
+  string.p = "P-Value", digits.p = 2,
+  show.p=T
+)
+
+
+
+# Levene's test
+
+leveneTest(normalised.degree ~ Plant_sp, metrics.ind.distrib)
+
+metrics.lev <- metrics.ind.distrib %>% 
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>%
+  mutate_at(c("normalised.degree", "strength", "weighted.closeness", "niche.overlap"), scale)
+
+metrics.lev %<>% group_by(Plant_sp) %>% 
+  mutate(norm_degree_mean= median(normalised.degree),
+         strength_mean= median(strength),
+         closeness_mean= median(weighted.closeness),
+         n_overlap_mean= median(niche.overlap))
+
+# Residuals and anova (DEGREE)
+metrics.lev$degree_resid <- abs(metrics.lev$normalised.degree - metrics.lev$norm_degree_mean)
+metrics.lev$strength_resid <- abs(metrics.lev$strength - metrics.lev$strength_mean)
+metrics.lev$closeness_resid <- abs(metrics.lev$weighted.closeness - metrics.lev$closeness_mean)
+metrics.lev$n_overlap_resid <- abs(metrics.lev$niche.overlap - metrics.lev$n_overlap_mean)
+
+aov <- aov(degree_resid ~ Plant_sp, data = metrics.lev)
+summary(aov)
+TukeyHSD(aov)
+
+# Residuals and anova
+metrics.lev$degree_resid <- abs(metrics.lev$normalised.degree - metrics.lev$norm_degree_mean)
+metrics.lev$strength_resid <- abs(metrics.lev$strength - metrics.lev$strength_mean)
+metrics.lev$closeness_resid <- abs(metrics.lev$weighted.closeness - metrics.lev$closeness_mean)
+metrics.lev$n_overlap_resid <- abs(metrics.lev$niche.overlap - metrics.lev$n_overlap_mean)
+
+## DEGREE
+aov.d <- aov(degree_resid ~ Plant_sp, data = metrics.lev)
+summary(aov.d)
+TukeyHSD(aov.d)
+
+## STRENGTH
+aov.st <- aov(strength_resid ~ Plant_sp, data = metrics.lev)
+summary(aov.st)
+TukeyHSD(aov.st)
+
+## CLOSENESS
+aov.wc <- aov(closeness_resid ~ Plant_sp, data = metrics.lev)
+summary(aov.wc)
+TukeyHSD(aov.wc)
+
+## DEGREE
+aov.no <- aov(n_overlap_resid ~ Plant_sp, data = metrics.lev)
+summary(aov.no)
+TukeyHSD(aov.no)
+
+metrics.resid <- metrics.lev %>% filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>%
+  group_by(Plant_sp) %>%
+  summarise_at(c("degree_resid", "strength_resid", "closeness_resid", "n_overlap_resid"), 
+               funs(var)) %>%
+  as.data.frame() %>% 
+  droplevels()
+
+str(metrics.resid)
+metrics.resid <- reshape::melt(metrics.resid, id.vars = "Plant_sp")
+
+resids <- reshape::melt(as.data.frame(metrics.lev[, c(2, 13:16)]), id.vars = "Plant_sp")
+
+ggplot(resids, aes(x=variable, y=value, fill=Plant_sp)) +
+  geom_boxplot(position = position_dodge(1), outlier.shape = NA, alpha=0.6)+
+      geom_point(aes(fill = Plant_sp, colour=Plant_sp), 
+                 alpha=0.6, size=1, 
+                 position = position_jitterdodge(jitter.width = .1, dodge.width = 1)) +
+  scale_fill_manual(values= cols2) +
+  scale_colour_manual(values= cols2) +
+  theme_bw() + 
+  ylab("Residuals") + xlab("Individual-level metric") +
+  scale_x_discrete(labels=c("Degree","Strength","Closeness", "Niche overlap")) +
+  scale_y_log10()
+  
+
+
+```
+

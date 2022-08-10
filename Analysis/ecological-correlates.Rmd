@@ -1,0 +1,1202 @@
+---
+title: "individual_specialization"
+author: "Blanca Arroyo-Correa"
+date: "2/1/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+
+```{r packages}
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(cowplot)
+library(igraph)
+library(magrittr)
+library(bipartite)
+library(igraph)
+
+library(r2d3)
+library(purrr) 
+library(tidyr) 
+library(stringr)
+library(tibble)
+library(RColorBrewer)
+library(scales)
+
+library(raster)
+library(viridis)
+library(ggridges)
+library(BBmisc)
+
+library(lubridate)
+library(spaa)
+library(asbio)
+library(pscl)
+library(boot)
+library(lmerTest)
+library(lme4)
+library(moments)
+
+library(tidySEM)
+library(lavaan)
+library(lavaanPlot)
+library(IDPmisc)
+
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(sjstats)
+library(visreg)
+library(patchwork)
+library(relaimpo)
+
+```
+
+# Read data
+
+The interaction matrix with standardized data is called 'total.int.mat' and it is constructed in the interaction-data-standardization' file. This is the interaction matrix including both video data and transect data.
+The 'id' dataset containing information on individual plants was also previously read.
+
+
+I need to check NAs produced in calculation of metrics
+
+```{r node.level.metrics}
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+total.int.mat <- read.csv("Data/complete_interaction_matrix.csv", sep=",")
+#ag.int.mat <- read.csv("Data/community_aggregated_matrix.csv", sep=",")
+
+# Distribution of individual plants per species and plot
+x <- aggregate(Plant_id ~ Plot + Plant_sp, plant.id, length)
+x <- dcast(x, Plot ~ Plant_sp)
+rownames(x) <- x[,1]
+x[,1] <- NULL
+x[is.na(x)] <- 0
+x.tot <- colSums(x)
+x <- rbind(x, x.tot)
+
+
+# Color palettes
+cols <- data.frame(Plant_sp = sort(unique(unique(plant.id$Plant_sp))), 
+                   stringsAsFactors = F)
+cols2 <- cbind(cols, data.frame(color = c("#a6cee3",
+"#1f78b4",
+"#b2df8a",
+"#33a02c",
+"#fb9a99",
+"#e31a1c",
+"#fdbf6f",
+"#ff7f00",
+"#cab2d6",
+"#6a3d9a",
+"grey50")))
+
+cols2 <- cbind(cols, data.frame(color = c("cadetblue3", "dodgerblue3",
+                                          "burlywood2", 
+                                          "lightpink1", "brown2", 
+                                          "darkolivegreen3", "forestgreen", 
+                                          "orange", "darkorange2", "gray70", 
+                                          "burlywood4")))
+
+cols2 <- setNames((cols2$color), cols$Plant_sp)
+
+complete.matrix <- merge(total.int.mat, plant.id[,c(3,5)], by="Plant_id")
+
+
+```
+
+# Calculate individual-level metrics
+
+Topological metrics were calculated for each individual plant within its individual-based network.
+
+```{r ind.metrics}
+
+matrix.per.sp <- split(complete.matrix, complete.matrix$Plant_sp)
+matrix.per.sp2 <- lapply(matrix.per.sp, function(i) i %>% dplyr::select(-Plant_sp))
+
+metrics.per.sp <- list()
+
+
+for (i in 1:length(matrix.per.sp2)) {
+  temp <- matrix.per.sp2[[i]][, -1] # remove Plant_id column
+  temp <- round(temp*1000, 0)
+  temp %<>% select_if(colSums(.) != 0) # remove non interacting pollinators
+  
+  # Calculate node-level metrics
+  temp2 <- specieslevel(temp, 
+                       level = "lower", index = c("degree", "species strength", "closeness")) 
+  
+  temp2$weighted.degree <- rowSums(temp)
+  
+  # Niche overlap
+  temp.mat <- matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])]
+  row.names(temp.mat) <- matrix.per.sp2[[i]]$Plant_id
+  jaccard.index <- as.matrix(proxy::simil(temp.mat, method = "bray"))
+  jaccard.index <- melt(jaccard.index, varnames = c("ind_1", "ind_2"))
+  jaccard.index <- aggregate(value ~ ind_1, jaccard.index, mean)
+  
+  temp2$niche.overlap <- jaccard.index$value
+  
+  # Partner evenness
+  H <- vegan::diversity(matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])])
+  S <- vegan::specnumber(matrix.per.sp2[[i]][2:ncol(matrix.per.sp2[[i]])])
+  J <- H/log(S)
+  
+  temp2$evenness <- J
+
+  temp2$Plant_id <- matrix.per.sp2[[i]]$Plant_id
+  metrics.per.sp[[i]] <- temp2
+}
+
+metrics <- bind_rows(metrics.per.sp)
+metrics[is.na(metrics)] <- 0
+metrics$closeness <- NULL
+names(metrics)[names(metrics) == 'species.strength'] <- 'strength'
+names(metrics)[names(metrics) == 'degree'] <- 'normalised.degree'
+
+metrics <- merge(plant.id[,5, drop=FALSE], metrics, by="Plant_id", all.x=T)
+metrics[is.na(metrics)] <- 0
+
+# plot
+metrics.id.sp <- merge(metrics, plant.id[,c(3,5)], by="Plant_id")
+metrics.id.sp.long <- melt(metrics.id.sp, id.vars=c("Plant_id", "Plant_sp"))
+str(metrics.id.sp.long)
+
+
+metrics.id.sp.long <- metrics.id.sp.long %>%
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR",
+         variable %in% c("normalised.degree",
+                         "strength",
+                         "weighted.closeness",
+                         "niche.overlap")) %>% droplevels
+
+```
+
+
+# Plant traits
+
+```{r traits}
+
+non.recorded.plants <- read.csv("Data/RBD_interaction_data_20220307.csv", sep=";")
+
+plant.id <- read.csv("Data/individual_plants_id.csv", sep=";")
+recorded.plants <- read.csv("Data/RBD_video_processing_20220307.csv", sep=";")
+
+flower.data.1 <- unique(dplyr::select(non.recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+flower.data.2 <- unique(dplyr::select(recorded.plants, c(Plot, Week, Plant_sp, Plant_id, N_flowers)))
+
+flower.data <- rbind(flower.data.1, flower.data.2)
+flower.data$N_flowers <- as.numeric(flower.data$N_flowers)
+
+# total number of flowers
+
+flower.data <- aggregate(N_flowers ~ Plant_id + Plant_sp + Plot, flower.data, sum)
+
+flower.data <- merge(flower.data, plant.id, by=c("Plant_id", "Plant_sp", "Plot"), all.x = T)
+
+flower.data$Plant_id[duplicated(flower.data$Plant_id)]
+
+
+plant.area <- read.csv("Data/Plant_traits/Plant_size/individual_plant_area.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Area_m2)
+
+plant.height <- read.csv("Data/Plant_traits/Plant_size/individual_plant_height.csv", sep=";") %>% 
+  dplyr::select(Plant_id, Height_cm)
+
+plant.traits <- merge(plant.id, flower.data[, c(1,4)], by="Plant_id", all.x=T)
+plant.traits[is.na(plant.traits)] <- 0
+
+plant.traits <- merge(plant.traits, plant.area, by="Plant_id")
+plant.traits <- merge(plant.traits, plant.height, by="Plant_id")
+
+cor.test(plant.traits$Area_m2, plant.traits$Height_cm)
+plot(plant.traits$Area_m2, plant.traits$Height_cm)
+
+cor.test(plant.traits$Area_m2, plant.traits$N_flowers)
+plot(plant.traits$Area_m2, plant.traits$N_flowers)
+
+cor.test(plant.traits$Height_cm, plant.traits$N_flowers)
+plot(plant.traits$Height_cm, plant.traits$N_flowers)
+
+# Flowering synchrony
+synchrony.index <- read.csv("Data/Plant_traits/flowering_synchrony_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, synchrony.index[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+all.data <- merge(plant.traits, metrics, by="Plant_id")
+
+plant.traits[rowSums(is.na(plant.traits)) > 0, ]
+
+# Neighbourhood cover
+cover.neigh <- read.csv("Data/Plant_traits/neighbourhood_plants.csv", sep=",")
+
+plant.traits <- merge(plant.traits, cover.neigh[,c(1,3:4)], 
+                      by="Plant_id", all.x = T)
+
+#write.csv(plant.traits,"Data/all_plant_traits.csv", row.names = FALSE)
+
+all.plant.data <- merge(plant.traits, metrics, by="Plant_id")
+
+cor.test(all.plant.data$Height_cm, all.plant.data$N_flowers)
+plot(all.plant.data$Height_cm, all.plant.data$N_flowers)
+
+cor.test(all.plant.data$Area_m2, all.plant.data$N_flowers)
+plot(all.plant.data$Area_m2, all.plant.data$N_flowers)
+
+
+```
+
+
+
+# Generalized Linear Models (overall)
+
+```{r glm}
+
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+all.data.norm <- as.data.frame(lapply(na.omit(all.plant.data[, c(6, 8:18)]), range01))
+
+all.data.norm <- cbind(plant.id[, c(2,3,5)], all.data.norm) # include plant_id and sp
+
+all.data.norm <- all.data.norm %>%
+  filter(Plant_sp != "CSAL", Plant_sp != "UPAR") %>%
+  droplevels
+
+### OVERALL MODELS
+
+## GLMM with random intercept
+
+# Normalised degree
+hist(log(all.plant.data$normalised.degree))
+model.degree <- lmer(log(normalised.degree+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                       range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) +
+                       (1|Plant_sp),
+                    data=all.data.norm)
+
+summary(model.degree)
+plot(model.degree)
+confint(model.degree)
+coef(model.degree)$Plant_sp # Estimates of the random effects (intercepts of Plant sp)
+r2(model.degree)
+
+
+# Strength
+hist(log(all.plant.data$strength))
+model.strength <- lmer((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) +
+                       (1|Plant_sp),
+                    data=all.data.norm)
+
+summary(model.strength)
+plot(model.strength)
+confint(model.strength)
+coef(model.strength)$Plant_sp # Estimates of the random effects (intercepts of Plant sp)
+r2(model.strength)
+
+
+# Weighted closeness
+hist(log(all.plant.data$weighted.closeness))
+
+model.weighted.closeness <- lmer(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) +
+                       (1|Plant_sp),
+                    data=all.data.norm)
+
+summary(model.weighted.closeness)
+plot(model.weighted.closeness)
+confint(model.weighted.closeness)
+coef(model.weighted.closeness)$Plant_sp # Estimates of the random effects (intercepts of Plant sp)
+r2(model.weighted.closeness)
+
+# Niche overlap
+hist(log(all.plant.data$niche.overlap))
+
+model.niche.overlap <- lmer(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) +
+                       (1|Plant_sp),
+                    data=all.data.norm)
+
+summary(model.niche.overlap)
+plot(model.niche.overlap)
+confint(model.niche.overlap)
+coef(model.niche.overlap)$Plant_sp # Estimates of the random effects (intercepts of Plant sp)
+r2(model.niche.overlap)
+
+
+# Model fit
+
+plot(model.strength, resid(., scaled=TRUE) ~ fitted(.), abline = 0,pch=16,xlab="Fitted values",ylab="Standardised residuals")
+
+plot(model.strength, resid(., scaled=TRUE) ~ fitted(.)| Plant_sp, abline = 0,pch=16,xlab="Fitted values",ylab="Standardised residuals")
+
+plot(model.strength, as.factor(Plant_sp) ~ resid(., scaled=TRUE),abline=0,pch=16,xlab="Standardised residuals",ylab="Regions")
+
+qqnorm(resid(model.strength),pch=16)
+qqline(resid(model.strength))
+
+
+
+tab_model(
+  model.degree, model.strength, model.weighted.closeness, model.niche.overlap,
+  dv.labels = c("Normalised degree", "Strength", "Weighted closeness", "Niche overlap"),
+  pred.labels = c("Intercept", "Number of flowers", "Height (cm)", 
+          "Conspecific flowering synchrony", "Heterospecific flowering synchrony",
+          "Conspecific neighborhood cover", "Heterospecific neighborhood cover"),
+  string.pred = "Coefficient",
+  string.ci = "CI (95%)",
+  string.est = "Estimate",
+  string.p = "P-Value", digits.p = 2
+)
+
+
+
+```
+
+# Generalized Linear Models (for each species) -  degree
+
+```{r glm}
+
+## AVEL
+hist(log(filter(all.data.norm, Plant_sp== "AVEL")$normalised.degree))
+model.degree.AVEL <- lm((log(normalised.degree+1)) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) ,
+                    data=filter(all.data.norm, Plant_sp== "AVEL"))
+
+summary(model.degree.AVEL)
+r2(model.degree.AVEL)
+
+
+## CLIB
+model.degree.CLIB <- lm((log(normalised.degree+1)) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het)+ range01(Cover_con) + range01(Cover_het) ,
+                    data=filter(all.data.norm, Plant_sp== "CLIB"))
+
+summary(model.degree.CLIB)
+
+## HCOM
+model.degree.HCOM <- lm((log(normalised.degree+1)) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HCOM"))
+
+summary(model.degree.HCOM)
+
+## HHAL
+model.degree.HHAL <- lm((log(normalised.degree+1)) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HHAL"))
+
+summary(model.degree.HHAL)
+
+## HPIC
+model.degree.HPIC <- lm((log(normalised.degree+1)) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) ,
+                    data=filter(all.data.norm, Plant_sp== "HPIC"))
+
+summary(model.degree.HPIC)
+
+## LPED
+model.degree.LPED <- lm(log(normalised.degree+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) ,
+                    data=filter(all.data.norm, Plant_sp== "LPED"))
+
+summary(model.degree.LPED)
+
+## ROFF
+model.degree.ROFF <- lm(log(normalised.degree+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "ROFF"))
+
+summary(model.degree.ROFF)
+
+## SGEN
+model.degree.SGEN <- lm(log(normalised.degree+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "SGEN"))
+
+summary(model.degree.SGEN)
+
+## TMAS
+model.degree.TMAS <- lm(log(normalised.degree+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "TMAS"))
+
+summary(model.degree.TMAS)
+
+
+# Combine all models
+
+tab_model(
+  model.degree.AVEL, model.degree.CLIB, model.degree.HCOM, 
+  model.degree.HHAL,model.degree.HPIC, model.degree.LPED, 
+  model.degree.ROFF, model.degree.SGEN, model.degree.TMAS, 
+  dv.labels = c("AVEL", "CLIB", "HCOM", "HHAL","HPIC", "LPED", "ROFF", "SGEN","TMAS"),
+  pred.labels = c("Intercept", "Number of flowers", "Height (cm)", 
+          "Conspecific flowering synchrony", "Heterospecific flowering synchrony",
+          "Conspecific neighborhood cover", "Heterospecific neighborhood cover"),
+  string.pred = "Coefficient",
+  string.ci = "CI (95%)",
+  string.est = "Estimate",
+  string.p = "P-Value", digits.p = 2,
+  show.p=T
+)
+
+
+
+full.plot.degree <- sjPlot::plot_models(
+  model.degree.AVEL, model.degree.CLIB, model.degree.HCOM, 
+  model.degree.HHAL, model.degree.HPIC, model.degree.LPED, 
+  model.degree.ROFF, model.degree.SGEN, model.degree.TMAS,
+  spacing = 0.7, dot.size=1.2, line.size = 0.4, vline.color="grey80") +
+  scale_color_manual(values = c("gray70","darkorange2","orange",
+                                "forestgreen","darkolivegreen3","brown2",
+                                "lightpink1","dodgerblue3","cadetblue3"),
+                     labels=c("TMAS", "SGEN", "ROFF", 
+                              "LPED", "HPIC", "HHAL", 
+                              "HCOM", "CLIB", "AVEL")) +
+  theme_minimal(base_size = 4) + ylab("Coefficient estimate") + xlab("") +
+  labs(title="Degree") +
+  theme(axis.text=element_text(size=11),
+       plot.title = element_text(size=12, 
+                                 margin = margin(t = 0, r = 0, b = 15, l = 0),
+                                 face="bold"),
+       axis.title=element_text(size=14), 
+       legend.text = element_text(size=12), legend.title=element_blank(),
+       axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)),
+       axis.text.y=element_text(margin=margin(t = 0, r = 10, b = 0, l = 0)),
+       axis.text.x=element_text(margin=margin(t = 10, r = 0, b = 0, l = 0))) +
+  scale_x_discrete(expand=c(0.1, 0.1), labels=c("range01(N_flowers)" = "Number of flowers",
+                         "range01(Height_cm)" = "Height",
+                         "range01(sync_index_con)" = "Flowering synchrony (C)",
+                         "range01(sync_index_het)" = "Flowering synchrony (H)",
+                         "range01(Cover_con)" = "Neigborhood cover (C)",
+                         "range01(Cover_het)" = "Neigborhood cover (H)")) + 
+  coord_flip(ylim = c(-0.65, 0.65)) +
+  scale_y_continuous(breaks = seq(-0.65, 0.65, by = 0.3))
+
+
+lmg.degree <- as.data.frame(cbind(calc.relimp(model.degree.AVEL, rela=T)$lmg,
+calc.relimp(model.degree.CLIB, rela=T)$lmg,
+calc.relimp(model.degree.HCOM, rela=T)$lmg,
+calc.relimp(model.degree.HHAL, rela=T)$lmg, 
+calc.relimp(model.degree.HPIC, rela=T)$lmg, 
+calc.relimp(model.degree.LPED, rela=T)$lmg,
+calc.relimp(model.degree.ROFF, rela=T)$lmg, 
+calc.relimp(model.degree.SGEN, rela=T)$lmg, 
+calc.relimp(model.degree.TMAS, rela=T)$lmg))
+
+lmg.degree$trait <- rownames(lmg.degree)
+lmg.degree <- melt(lmg.degree, id.vars="trait")
+lmg.degree <- as.data.frame(as.matrix(aggregate(value ~ trait, lmg.degree, function(x) c(mean = mean(x), sd = sd(x) ))))
+names(lmg.degree) <- c("trait", "degree.mean", "degree.sd")
+
+
+
+```
+
+# Generalized Linear Models (for each species) - Strength
+
+```{r glm}
+
+## AVEL
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "AVEL")$strength))
+model.strength.AVEL <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "AVEL"))
+
+summary(model.strength.AVEL)
+
+## CLIB
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "CLIB")$strength))
+model.strength.CLIB <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "CLIB"))
+
+summary(model.strength.CLIB)
+
+## HCOM
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "HCOM")$strength))
+model.strength.HCOM <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HCOM"))
+
+summary(model.strength.HCOM)
+
+## HHAL
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "HHAL")$strength))
+model.strength.HHAL <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HHAL"))
+
+summary(model.strength.HHAL)
+
+## HPIC
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "HPIC")$strength))
+model.strength.HPIC <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HPIC"))
+
+summary(model.strength.HPIC)
+
+## LPED
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "LPED")$strength))
+model.strength.LPED <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "LPED"))
+
+summary(model.strength.LPED)
+
+## ROFF
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "ROFF")$strength))
+model.strength.ROFF <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "ROFF"))
+
+summary(model.strength.ROFF)
+
+## SGEN
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "SGEN")$strength))
+model.strength.SGEN <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "SGEN"))
+
+summary(model.strength.SGEN)
+
+## TMAS
+hist(log(filter(na.omit(all.data.norm), Plant_sp== "TMAS")$strength))
+model.strength.TMAS <- lm((log(strength+1)) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "TMAS"))
+
+summary(model.strength.TMAS)
+
+# Combine all models
+
+tab_model(
+  model.strength.AVEL, model.strength.CLIB, model.strength.HCOM, 
+  model.strength.HHAL, model.strength.HPIC, model.strength.LPED, 
+  model.strength.ROFF, model.strength.SGEN, model.strength.TMAS, 
+  dv.labels = c("AVEL", "CLIB", "HCOM", "HHAL","HPIC", "LPED", "ROFF", "SGEN","TMAS"),
+  pred.labels = c("Intercept", "Number of flowers", "Height (cm)", 
+          "Conspecific flowering synchrony", "Heterospecific flowering synchrony",
+          "Conspecific neighborhood cover", "Heterospecific neighborhood cover"),
+  string.pred = "Coeffcient",
+  string.ci = "Conf. Int (95%)",
+  string.p = "P-Value", digits.p = 2
+)
+
+
+full.plot.strength <- sjPlot::plot_models(
+  model.strength.AVEL, model.strength.CLIB, model.strength.HCOM, 
+  model.strength.HHAL, model.strength.HPIC, model.strength.LPED, 
+  model.strength.ROFF, model.strength.SGEN, model.strength.TMAS,
+  spacing = 0.7, dot.size=1.2, line.size = 0.4, vline.color="grey80")  +
+  scale_color_manual(values = c("gray70","darkorange2","orange",
+                                "forestgreen","darkolivegreen3","brown2",
+                                "lightpink1","dodgerblue3","cadetblue3"),
+                     labels=c("TMAS", "SGEN", "ROFF", 
+                              "LPED", "HPIC", "HHAL", 
+                              "HCOM", "CLIB", "AVEL")) +
+  theme_minimal(base_size = 4) + ylab("Coefficient estimate") + xlab("") +
+  labs(title="(B) Strength") +
+  theme(axis.text=element_text(size=11),
+       plot.title = element_text(size=12, 
+                                 margin = margin(t = 0, r = 0, b = 15, l = 0),
+                                 face="bold"),
+       axis.title=element_text(size=14), 
+       legend.text = element_text(size=15), legend.title=element_blank(),
+       axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)),
+       axis.text.y=element_text(margin=margin(t = 0, r = 10, b = 0, l = 0)),
+       axis.text.x=element_text(margin=margin(t = 10, r = 0, b = 0, l = 0))) +
+  scale_x_discrete(expand=c(0.1, 0.1), labels=c("range01(N_flowers)" = "Number of flowers",
+                         "range01(Height_cm)" = "Height",
+                         "range01(sync_index_con)" = "Flowering synchrony (C)",
+                         "range01(sync_index_het)" = "Flowering synchrony (H)",
+                         "range01(Cover_con)" = "Neigborhood cover (C)",
+                         "range01(Cover_het)" = "Neigborhood cover (H)")) + 
+  coord_flip(ylim = c(-0.7, 0.7)) +
+  scale_y_continuous(breaks = seq(-0.7, 0.7, by = 0.3))
+
+lmg.strength <- as.data.frame(cbind(calc.relimp(model.strength.AVEL, rela=T)$lmg,
+calc.relimp(model.strength.CLIB, rela=T)$lmg,
+calc.relimp(model.strength.HCOM, rela=T)$lmg,
+calc.relimp(model.strength.HHAL, rela=T)$lmg, 
+calc.relimp(model.strength.HPIC, rela=T)$lmg, 
+calc.relimp(model.strength.LPED, rela=T)$lmg,
+calc.relimp(model.strength.ROFF, rela=T)$lmg, 
+calc.relimp(model.strength.SGEN, rela=T)$lmg, 
+calc.relimp(model.strength.TMAS, rela=T)$lmg))
+
+lmg.strength$trait <- rownames(lmg.strength)
+lmg.strength <- melt(lmg.strength, id.vars="trait")
+lmg.strength <- as.data.frame(as.matrix(aggregate(value ~ trait, lmg.strength, function(x) c(mean = mean(x), sd = sd(x) ))))
+names(lmg.strength) <- c("trait", "strength.mean", "strength.sd")
+
+```
+
+# Generalized Linear Models (for each species) - Weighted closeness
+
+```{r glm}
+
+## AVEL
+model.closeness.AVEL <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "AVEL"))
+
+summary(model.closeness.AVEL)
+
+## CLIB
+model.closeness.CLIB <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "CLIB"))
+
+summary(model.closeness.CLIB)
+
+## HCOM
+model.closeness.HCOM <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "HCOM"))
+
+summary(model.closeness.HCOM)
+
+## HHAL
+model.closeness.HHAL <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "HHAL"))
+
+summary(model.closeness.HHAL)
+
+## HPIC
+model.closeness.HPIC <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "HPIC"))
+
+summary(model.closeness.HPIC)
+
+## LPED
+model.closeness.LPED <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "LPED"))
+
+summary(model.closeness.LPED)
+
+## ROFF
+model.closeness.ROFF <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "ROFF"))
+
+summary(model.closeness.ROFF)
+
+## SGEN
+model.closeness.SGEN <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "SGEN"))
+
+summary(model.closeness.SGEN)
+
+## TMAS
+model.closeness.TMAS <- lm(log(weighted.closeness+1) ~ 
+                      range01(N_flowers) + range01(Height_cm) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter((all.data.norm), Plant_sp== "TMAS"))
+
+summary(model.closeness.TMAS)
+
+# Combine all models
+
+tab_model(
+  model.closeness.AVEL, model.closeness.CLIB, model.closeness.HCOM, 
+  model.closeness.HHAL, model.closeness.HPIC, model.closeness.LPED, 
+  model.closeness.ROFF, model.closeness.SGEN, model.closeness.TMAS, 
+  dv.labels = c("AVEL", "CLIB", "HCOM", "HHAL","HPIC", "LPED", "ROFF", "SGEN","TMAS"),
+  pred.labels = c("Intercept", "Number of flowers", "Height (cm)", 
+          "Conspecific flowering synchrony", "Heterospecific flowering synchrony",
+          "Conspecific neighborhood cover", "Heterospecific neighborhood cover"),
+  string.pred = "Coeffcient",
+  string.ci = "Conf. Int (95%)",
+  string.p = "P-Value", digits.p = 2
+)
+
+
+full.plot.closeness <- sjPlot::plot_models(
+  model.closeness.AVEL, model.closeness.CLIB, model.closeness.HCOM, 
+  model.closeness.HHAL, model.closeness.HPIC, model.closeness.LPED, 
+  model.closeness.ROFF, model.closeness.SGEN, model.closeness.TMAS,
+  spacing = 0.7, dot.size=1.2, line.size = 0.4, vline.color="grey80") +
+  scale_color_manual(values = c("gray70","darkorange2","orange",
+                                "forestgreen","darkolivegreen3","brown2",
+                                "lightpink1","dodgerblue3","cadetblue3"),
+                     labels=c("TMAS", "SGEN", "ROFF", 
+                              "LPED", "HPIC", "HHAL", 
+                              "HCOM", "CLIB", "AVEL")) +
+  theme_minimal(base_size = 4) + ylab("Coefficient estimate") + xlab("") +
+  labs(title="(C) Weighted closeness") +
+  theme(axis.text=element_text(size=11),
+       plot.title = element_text(size=12, 
+                                 margin = margin(t = 0, r = 0, b = 15, l = 0),
+                                 face="bold"),
+       axis.title=element_text(size=14), 
+       legend.text = element_text(size=15), legend.title=element_blank(),
+       axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)),
+       axis.text.y=element_text(margin=margin(t = 0, r = 10, b = 0, l = 0)),
+       axis.text.x=element_text(margin=margin(t = 10, r = 0, b = 0, l = 0))) +
+  scale_x_discrete(expand=c(0.1, 0.1), labels=c("range01(N_flowers)" = "Number of flowers",
+                         "range01(Height_cm)" = "Height",
+                         "range01(sync_index_con)" = "Flowering synchrony (C)",
+                         "range01(sync_index_het)" = "Flowering synchrony (H)",
+                         "range01(Cover_con)" = "Neigborhood cover (C)",
+                         "range01(Cover_het)" = "Neigborhood cover (H)")) + 
+  coord_flip(ylim = c(-0.20, 0.20)) +
+  scale_y_continuous(breaks = seq(-0.20, 0.20, by = 0.1))
+
+
+lmg.closeness <- as.data.frame(cbind(calc.relimp(model.closeness.AVEL, rela=T)$lmg,
+calc.relimp(model.closeness.CLIB, rela=T)$lmg,
+calc.relimp(model.closeness.HCOM, rela=T)$lmg,
+calc.relimp(model.closeness.HHAL, rela=T)$lmg, 
+calc.relimp(model.closeness.HPIC, rela=T)$lmg, 
+calc.relimp(model.closeness.LPED, rela=T)$lmg,
+calc.relimp(model.closeness.ROFF, rela=T)$lmg, 
+calc.relimp(model.closeness.SGEN, rela=T)$lmg, 
+calc.relimp(model.closeness.TMAS, rela=T)$lmg))
+
+lmg.closeness$trait <- rownames(lmg.closeness)
+lmg.closeness <- melt(lmg.closeness, id.vars="trait")
+lmg.closeness <- as.data.frame(as.matrix(aggregate(value ~ trait, lmg.closeness, function(x) c(mean = mean(x), sd = sd(x) ))))
+names(lmg.closeness) <- c("trait", "closeness.mean", "closeness.sd")
+
+
+```
+
+# Generalized Linear Models (for each species) - Niche overlap
+
+```{r glm}
+
+
+## AVEL
+hist((filter(na.omit(all.data.norm), Plant_sp== "AVEL")$niche.overlap))
+model.niche.overlap.AVEL <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het), 
+                    data=filter(all.data.norm, Plant_sp== "AVEL"))
+
+summary(model.niche.overlap.AVEL)
+
+## CLIB
+hist((filter(na.omit(all.data.norm), Plant_sp== "CLIB")$niche.overlap))
+model.niche.overlap.CLIB <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "CLIB"))
+
+summary(model.niche.overlap.CLIB)
+
+## HCOM
+hist((filter(na.omit(all.data.norm), Plant_sp== "HCOM")$niche.overlap))
+model.niche.overlap.HCOM <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het) ,
+                    data=filter(all.data.norm, Plant_sp== "HCOM"))
+
+summary(model.niche.overlap.HCOM)
+
+## HHAL
+hist((filter(na.omit(all.data.norm), Plant_sp== "HHAL")$niche.overlap))
+model.niche.overlap.HHAL <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HHAL"))
+
+summary(model.niche.overlap.HHAL)
+
+## HPIC
+hist((filter(na.omit(all.data.norm), Plant_sp== "HPIC")$niche.overlap))
+model.niche.overlap.HPIC <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "HPIC"))
+
+summary(model.niche.overlap.HPIC)
+
+## LPED
+hist((filter(na.omit(all.data.norm), Plant_sp== "LPED")$niche.overlap))
+model.niche.overlap.LPED <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "LPED"))
+
+summary(model.niche.overlap.LPED)
+
+## ROFF
+hist((filter(na.omit(all.data.norm), Plant_sp== "ROFF")$niche.overlap))
+model.niche.overlap.ROFF <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "ROFF"))
+
+summary(model.niche.overlap.ROFF)
+
+## SGEN
+hist((filter(na.omit(all.data.norm), Plant_sp== "SGEN")$niche.overlap))
+model.niche.overlap.SGEN <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "SGEN"))
+
+summary(model.niche.overlap.SGEN)
+
+## TMAS
+hist((filter(na.omit(all.data.norm), Plant_sp== "TMAS")$niche.overlap))
+model.niche.overlap.TMAS <- lm(log(niche.overlap+1) ~ 
+                      range01(N_flowers) + range01(sync_index_con) +
+                        range01(sync_index_het) + range01(Cover_con) + range01(Cover_het),
+                    data=filter(all.data.norm, Plant_sp== "TMAS"))
+
+summary(model.niche.overlap.TMAS)
+
+# Combine all models
+
+tab_model(
+  model.niche.overlap.AVEL, model.niche.overlap.CLIB, model.niche.overlap.HCOM, 
+  model.niche.overlap.HHAL, model.niche.overlap.HPIC, model.niche.overlap.LPED, 
+  model.niche.overlap.ROFF, model.niche.overlap.SGEN, model.niche.overlap.TMAS, 
+  dv.labels = c("AVEL", "CLIB", "HCOM", "HHAL","HPIC", "LPED", "ROFF", "SGEN","TMAS"),
+  pred.labels = c("Intercept", "Number of flowers", 
+          "Conspecific flowering synchrony", "Heterospecific flowering synchrony",
+          "Conspecific neighborhood cover", "Heterospecific neighborhood cover"),
+  string.pred = "Coeffcient",
+  string.ci = "Conf. Int (95%)",
+  string.p = "P-Value", digits.p = 2
+)
+
+
+full.plot.nicheoverlap <- sjPlot::plot_models(
+  model.niche.overlap.AVEL, model.niche.overlap.CLIB, model.niche.overlap.HCOM, 
+  model.niche.overlap.HHAL, model.niche.overlap.HPIC, model.niche.overlap.LPED, 
+  model.niche.overlap.ROFF, model.niche.overlap.SGEN, model.niche.overlap.TMAS,
+  spacing = 0.7, dot.size=1.2, line.size = 0.4, vline.color="grey80") +
+  scale_color_manual(values = c("gray70","darkorange2","orange",
+                                "forestgreen","darkolivegreen3","brown2",
+                                "lightpink1","dodgerblue3","cadetblue3"),
+                     labels=c("TMAS", "SGEN", "ROFF", 
+                              "LPED", "HPIC", "HHAL", 
+                              "HCOM", "CLIB", "AVEL")) +
+  theme_minimal(base_size = 4) + ylab("Coefficient estimate") + xlab("") +
+  labs(title="Niche overlap") +
+  theme(axis.text=element_text(size=11),
+       plot.title = element_text(size=12, 
+                                 margin = margin(t = 0, r = 0, b = 15, l = 0),
+                                 face="bold"),
+       axis.title=element_text(size=14), 
+       legend.text = element_text(size=15), legend.title=element_blank(),
+       axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)),
+       axis.text.y=element_text(margin=margin(t = 0, r = 10, b = 0, l = 0)),
+       axis.text.x=element_text(margin=margin(t = 10, r = 0, b = 0, l = 0))) +
+  scale_x_discrete(expand=c(0.1, 0.1), labels=c("range01(N_flowers)" = "Number of flowers",
+                         "range01(Height_cm)" = "Height",
+                         "range01(sync_index_con)" = "Flowering synchrony (C)",
+                         "range01(sync_index_het)" = "Flowering synchrony (H)",
+                         "range01(Cover_con)" = "Neigborhood cover (C)",
+                         "range01(Cover_het)" = "Neigborhood cover (H)")) + 
+  coord_flip(ylim = c(-1, 1)) +
+  scale_y_continuous(breaks = seq(-1, 1, by = 0.5))
+
+
+
+lmg.niche.overlap <- as.data.frame(cbind(calc.relimp(model.niche.overlap.AVEL, rela=T)$lmg,
+calc.relimp(model.niche.overlap.CLIB, rela=T)$lmg,
+calc.relimp(model.niche.overlap.HCOM, rela=T)$lmg,
+calc.relimp(model.niche.overlap.HHAL, rela=T)$lmg, 
+calc.relimp(model.niche.overlap.HPIC, rela=T)$lmg, 
+calc.relimp(model.niche.overlap.LPED, rela=T)$lmg,
+calc.relimp(model.niche.overlap.ROFF, rela=T)$lmg, 
+calc.relimp(model.niche.overlap.SGEN, rela=T)$lmg, 
+calc.relimp(model.niche.overlap.TMAS, rela=T)$lmg))
+
+lmg.niche.overlap$trait <- rownames(lmg.niche.overlap)
+lmg.niche.overlap <- melt(lmg.niche.overlap, id.vars="trait")
+lmg.niche.overlap <- as.data.frame(as.matrix(aggregate(value ~ trait, lmg.niche.overlap, function(x) c(mean = mean(x), sd = sd(x) ))))
+names(lmg.niche.overlap) <- c("trait", "niche.overlap.mean", "niche.overlap.sd")
+
+
+lmg.d.no <- merge(lmg.degree, lmg.niche.overlap, by="trait")
+
+lmg.d.no <- lmg.d.no %>% mutate_at((names(lmg.d.no)[2:5]), as.numeric)
+str(lmg.d.no)
+
+lmg.d.no %<>% mutate_if(is.numeric, ~ . * 100)
+lmg.d.no %>% mutate_if(is.numeric, round, digits=2)
+
+
+# plot
+
+full.plot.degree + full.plot.nicheoverlap + full.plot.strength + full.plot.closeness + 
+  plot_layout(ncol = 4)
+
+
+```
+
+```{r model.diag}
+
+# DEGREE
+plot(model.degree.AVEL)
+plot(model.degree.CLIB)
+plot(model.degree.HCOM)
+plot(model.degree.HHAL)
+plot(model.degree.HPIC)
+plot(model.degree.LPED)
+plot(model.degree.ROFF)
+plot(model.degree.SGEN)
+plot(model.degree.TMAS)
+
+lattice::qqmath(model.degree.AVEL)
+lattice::qqmath(model.degree.CLIB)
+lattice::qqmath(model.degree.HCOM)
+lattice::qqmath(model.degree.HHAL)
+lattice::qqmath(model.degree.HPIC)
+lattice::qqmath(model.degree.LPED)
+lattice::qqmath(model.degree.ROFF)
+lattice::qqmath(model.degree.SGEN)
+lattice::qqmath(model.degree.TMAS)
+
+# squared correlation between the response variable and the predicted values
+cor(model.response(model.frame(model.degree.AVEL)),predict(model.degree.AVEL,type="response"))^2
+cor(model.response(model.frame(model.degree.CLIB)),predict(model.degree.CLIB,type="response"))^2
+cor(model.response(model.frame(model.degree.HCOM)),predict(model.degree.HCOM,type="response"))^2
+cor(model.response(model.frame(model.degree.HHAL)),predict(model.degree.HHAL,type="response"))^2
+cor(model.response(model.frame(model.degree.HPIC)),predict(model.degree.HPIC,type="response"))^2
+cor(model.response(model.frame(model.degree.LPED)),predict(model.degree.LPED,type="response"))^2
+cor(model.response(model.frame(model.degree.ROFF)),predict(model.degree.ROFF,type="response"))^2
+cor(model.response(model.frame(model.degree.SGEN)),predict(model.degree.SGEN,type="response"))^2
+cor(model.response(model.frame(model.degree.TMAS)),predict(model.degree.TMAS,type="response"))^2
+
+
+# STRENGTH
+plot(model.strength.AVEL)
+plot(model.strength.CLIB)
+plot(model.strength.HCOM)
+plot(model.strength.HHAL)
+plot(model.strength.HPIC)
+plot(model.strength.LPED)
+plot(model.strength.ROFF)
+plot(model.strength.SGEN)
+plot(model.strength.TMAS)
+
+lattice::qqmath(model.strength.AVEL)
+lattice::qqmath(model.strength.CLIB)
+lattice::qqmath(model.strength.HCOM)
+lattice::qqmath(model.strength.HHAL)
+lattice::qqmath(model.strength.HPIC)
+lattice::qqmath(model.strength.LPED)
+lattice::qqmath(model.strength.ROFF)
+lattice::qqmath(model.strength.SGEN)
+lattice::qqmath(model.strength.TMAS)
+
+# squared correlation between the response variable and the predicted values
+cor(model.response(model.frame(model.strength.AVEL)),predict(model.strength.AVEL,type="response"))^2
+cor(model.response(model.frame(model.strength.CLIB)),predict(model.strength.CLIB,type="response"))^2
+cor(model.response(model.frame(model.strength.HCOM)),predict(model.strength.HCOM,type="response"))^2
+cor(model.response(model.frame(model.strength.HHAL)),predict(model.strength.HHAL,type="response"))^2
+cor(model.response(model.frame(model.strength.HPIC)),predict(model.strength.HPIC,type="response"))^2
+cor(model.response(model.frame(model.strength.LPED)),predict(model.strength.LPED,type="response"))^2
+cor(model.response(model.frame(model.strength.ROFF)),predict(model.strength.ROFF,type="response"))^2
+cor(model.response(model.frame(model.strength.SGEN)),predict(model.strength.SGEN,type="response"))^2
+cor(model.response(model.frame(model.strength.TMAS)),predict(model.strength.TMAS,type="response"))^2
+
+
+# CLOSENESS
+plot(model.closeness.AVEL)
+plot(model.closeness.CLIB)
+plot(model.closeness.HCOM)
+plot(model.closeness.HHAL)
+plot(model.closeness.HPIC)
+plot(model.closeness.LPED)
+plot(model.closeness.ROFF)
+plot(model.closeness.SGEN)
+plot(model.closeness.TMAS)
+
+lattice::qqmath(model.closeness.AVEL)
+lattice::qqmath(model.closeness.CLIB)
+lattice::qqmath(model.closeness.HCOM)
+lattice::qqmath(model.closeness.HHAL)
+lattice::qqmath(model.closeness.HPIC)
+lattice::qqmath(model.closeness.LPED)
+lattice::qqmath(model.closeness.ROFF)
+lattice::qqmath(model.closeness.SGEN)
+lattice::qqmath(model.closeness.TMAS)
+
+# squared correlation between the response variable and the predicted values
+cor(model.response(model.frame(model.closeness.AVEL)),predict(model.closeness.AVEL,type="response"))^2
+cor(model.response(model.frame(model.closeness.CLIB)),predict(model.closeness.CLIB,type="response"))^2
+cor(model.response(model.frame(model.closeness.HCOM)),predict(model.closeness.HCOM,type="response"))^2
+cor(model.response(model.frame(model.closeness.HHAL)),predict(model.closeness.HHAL,type="response"))^2
+cor(model.response(model.frame(model.closeness.HPIC)),predict(model.closeness.HPIC,type="response"))^2
+cor(model.response(model.frame(model.closeness.LPED)),predict(model.closeness.LPED,type="response"))^2
+cor(model.response(model.frame(model.closeness.ROFF)),predict(model.closeness.ROFF,type="response"))^2
+cor(model.response(model.frame(model.closeness.SGEN)),predict(model.closeness.SGEN,type="response"))^2
+cor(model.response(model.frame(model.closeness.TMAS)),predict(model.closeness.TMAS,type="response"))^2
+
+
+# NICHE OVERLAP
+plot(model.niche.overlap.AVEL)
+plot(model.niche.overlap.CLIB)
+plot(model.niche.overlap.HCOM)
+plot(model.niche.overlap.HHAL)
+plot(model.niche.overlap.HPIC)
+plot(model.niche.overlap.LPED)
+plot(model.niche.overlap.ROFF)
+plot(model.niche.overlap.SGEN)
+plot(model.niche.overlap.TMAS)
+
+lattice::qqmath(model.niche.overlap.AVEL)
+lattice::qqmath(model.niche.overlap.CLIB)
+lattice::qqmath(model.niche.overlap.HCOM)
+lattice::qqmath(model.niche.overlap.HHAL)
+lattice::qqmath(model.niche.overlap.HPIC)
+lattice::qqmath(model.niche.overlap.LPED)
+lattice::qqmath(model.niche.overlap.ROFF)
+lattice::qqmath(model.niche.overlap.SGEN)
+lattice::qqmath(model.niche.overlap.TMAS)
+
+# squared correlation between the response variable and the predicted values
+cor(model.response(model.frame(model.niche.overlap.AVEL)),predict(model.niche.overlap.AVEL,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.CLIB)),predict(model.niche.overlap.CLIB,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.HCOM)),predict(model.niche.overlap.HCOM,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.HHAL)),predict(model.niche.overlap.HHAL,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.HPIC)),predict(model.niche.overlap.HPIC,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.LPED)),predict(model.niche.overlap.LPED,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.ROFF)),predict(model.niche.overlap.ROFF,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.SGEN)),predict(model.niche.overlap.SGEN,type="response"))^2
+cor(model.response(model.frame(model.niche.overlap.TMAS)),predict(model.niche.overlap.TMAS,type="response"))^2
+
+
+
+
+```
+
+```{r combine.plots}
+
+full.model.plot <- full.plot.degree + full.plot.strength + full.plot.closeness + full.plot.nicheoverlap + 
+  plot_layout(ncol = 4)
+
+full.model.plot[[1]] = full.model.plot[[1]] + theme(legend.position="none") 
+full.model.plot[[2]] = full.model.plot[[2]] + 
+            theme(legend.position="none", axis.text.y = element_blank(), axis.ticks.y = element_blank()) 
+full.model.plot[[3]] = full.model.plot[[3]] + 
+            theme(legend.position="none", axis.text.y = element_blank(), axis.ticks.y = element_blank())
+full.model.plot[[4]] = full.model.plot[[4]] + 
+            theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+
+full.model.plot <- full.plot.degree + full.plot.nicheoverlap + 
+  plot_layout(ncol = 2)
+
+full.model.plot[[1]] = full.model.plot[[1]] + theme(legend.position="none") 
+full.model.plot[[2]] = full.model.plot[[2]] + 
+            theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) 
+
+
+```
+
+
+# Structural Equation Models
+
+```{r SEM}
+
+
+#data.norm <- all.data %>% filter(Plant_sp == "ROFF")
+data.norm <- na.omit(all.data)
+data.norm <- as.data.frame(lapply((data.norm[, c(4, 8:18)]), range01))
+cor(data.norm)
+
+
+m1a <- lm(degree ~ N_flowers, data=data.norm)
+(fit1a <-summary(m1a))
+
+
+library(lavaan)
+
+#simple regression using lavaan 
+m1b <-   '
+  # regressions
+    degree ~ 1 + N_flowers
+  # variance (optional)
+    N_flowers ~~ N_flowers
+'
+fit1b <- sem(m1b, data=data.norm)
+summary(fit1b)
+
+#multiple regression using lavaan 
+
+m2 <- '
+  # regressions
+    degree ~ 1 + N_flowers + sync_index_het
+ # covariance
+    N_flowers ~~ sync_index_con
+'
+fit2 <- sem(m2, data=data.norm)
+summary(fit2)
+
+#multivariate regression using lavaan 
+
+m3a <- '
+# regressions
+N_flowers ~ 1 + Height_cm
+weighted.degree ~ 1 + N_flowers + Height_cm + sync_index_het + sync_index_con + Cover_con + Cover_het
+strength ~ 1 + N_flowers + Height_cm + sync_index_het + sync_index_con + Cover_con + Cover_het + weighted.degree + niche.overlap
+weighted.closeness ~ 1 + N_flowers + Height_cm + sync_index_het + sync_index_con + Cover_con + Cover_het + weighted.degree
+niche.overlap ~ 1 + N_flowers + Height_cm + sync_index_het + sync_index_con + Cover_con + Cover_het
+
+'
+fit3a <- sem(m3a, data=data.norm)
+summary(fit3a)
+
+inspect(fit3a, what="cor.all")
+lavCor(fit3a)
+resid(fit3a, "cor")
+
+
+
+lavaanPlot(model = fit3a, node_options = list(shape = "box", fontname = "Helvetica"), edge_options = list(color = "grey"), coefs = TRUE)
+
+lavaanPlot(model = fit3a, node_options = list(shape = "box", fontname = "Helvetica"), edge_options = list(color = "grey"), coefs = TRUE, sig = .05, stand=TRUE)
+
+
+```
+
