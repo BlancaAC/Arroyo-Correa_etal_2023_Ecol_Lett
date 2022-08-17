@@ -972,7 +972,6 @@ obs.null.sign %<>%
 
 ```
 
-
 # Skewness and kurtosis - differences among plant species
 
 ```{r skew.kurt.tests}
