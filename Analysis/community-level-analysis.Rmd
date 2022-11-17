@@ -616,7 +616,7 @@ for (k in seq_along(random.flower.sim.all[[z]])){
   e <- list()
   f <- list()
   for (j in seq_along(random.flower.sim.all[[z]][[k]])){
-  temp <- dplyr::select(as.data.frame(random.flower.sim.all[[z]][[k]][[j]]), -Plant_sp, -Iteration, -Level)
+  #
   temp <- round(temp*100, 0) # 1000 or 100?
   temp %<>% select_if(colSums(.) != 0) 
   if(ncol(temp)>1) {
